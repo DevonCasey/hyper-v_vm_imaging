@@ -1,0 +1,365 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# Enhanced Vagrantfile template for Windows Server 2025 environments
+# This template provides a standardized configuration base for all VM types
+
+Vagrant.configure("2") do |config|
+  # Use the golden image - FIXED VERSION REFERENCE
+  config.vm.box = "windows-server-2025-golden"
+  
+  # Enhanced VM configuration with better defaults
+  config.vm.guest = :windows
+  config.vm.communicator = "winrm"
+  config.vm.boot_timeout = 600
+  config.vm.graceful_halt_timeout = 600
+  
+  # Enhanced WinRM configuration
+  config.winrm.username = "vagrant"
+  config.winrm.password = "vagrant"
+  config.winrm.transport = :plaintext
+  config.winrm.basic_auth_only = true
+  config.winrm.timeout = 300
+  config.winrm.retry_limit = 30  # Increased for reliability
+  config.winrm.retry_delay = 10
+  config.winrm.max_tries = 20
+  
+  # Function to prompt for VM configuration
+  def get_vm_config(vm_type, defaults = {})
+    config = {}
+    
+    # Only prompt during 'vagrant up' and if not automated
+    if ARGV[0] == "up" && ARGV.length <= 2 && ENV['VAGRANT_AUTOMATED'] != 'true'
+      puts "\n" + "=" * 60
+      puts "   #{vm_type.upcase} VM Configuration"
+      puts "=" * 60
+      
+      print "Enter VM name [#{defaults[:name]}]: "
+      config[:name] = $stdin.gets.chomp
+      config[:name] = defaults[:name] if config[:name].empty?
+      
+      print "Enter data drive name [#{defaults[:drive_name]}]: "
+      config[:drive_name] = $stdin.gets.chomp
+      config[:drive_name] = defaults[:drive_name] if config[:drive_name].empty?
+      config[:drive_letter] = config[:drive_name][0].upcase
+      
+      print "Enter size for #{config[:drive_letter]}: drive in GB [#{defaults[:drive_size]}]: "
+      size_input = $stdin.gets.chomp
+      config[:drive_size] = size_input.empty? ? defaults[:drive_size] : size_input.to_i
+      
+      print "Fixed size drive? (y/n) [#{defaults[:fixed_size] ? 'y' : 'n'}]: "
+      fixed_input = $stdin.gets.chomp.downcase
+      config[:fixed_size] = if fixed_input.empty?
+                             defaults[:fixed_size]
+                           else
+                             ['y', 'yes'].include?(fixed_input)
+                           end
+      
+      print "Memory in MB [#{defaults[:memory]}]: "
+      memory_input = $stdin.gets.chomp
+      config[:memory] = memory_input.empty? ? defaults[:memory] : memory_input.to_i
+      
+      print "CPU cores [#{defaults[:cpus]}]: "
+      cpu_input = $stdin.gets.chomp
+      config[:cpus] = cpu_input.empty? ? defaults[:cpus] : cpu_input.to_i
+      
+      puts "\nConfiguration Summary:"
+      puts "  VM Name: #{config[:name]}"
+      puts "  #{config[:drive_letter]}: Drive: #{config[:drive_name]} (#{config[:drive_size]} GB, #{config[:fixed_size] ? 'Fixed' : 'Dynamic'})"
+      puts "  Memory: #{config[:memory]} MB"
+      puts "  CPUs: #{config[:cpus]}"
+      puts ""
+      
+    else
+      # Use defaults for automated runs
+      config = defaults.dup
+      config[:drive_letter] = config[:drive_name][0].upcase
+    end
+    
+    config
+  end
+  
+  # Function to create and attach additional drives
+  def setup_additional_drive(vm_config)
+    config.trigger.before :up do |trigger|
+      trigger.info = "Creating #{vm_config[:drive_letter]}: drive (#{vm_config[:drive_name]})..."
+      trigger.run = {
+        inline: "powershell -Command \"" +
+          "$DrivePath = '#{vm_config[:name]}_#{vm_config[:drive_letter].downcase}.vhdx'; " +
+          "$DriveSize = #{vm_config[:drive_size]}GB; " +
+          "$FixedSize = $#{vm_config[:fixed_size]}; " +
+          "if (!(Test-Path $DrivePath)) { " +
+            "if ($FixedSize) { " +
+              "New-VHD -Path $DrivePath -SizeBytes $DriveSize -Fixed; " +
+            "} else { " +
+              "New-VHD -Path $DrivePath -SizeBytes $DriveSize -Dynamic; " +
+            "} " +
+            "Write-Host 'Created #{vm_config[:drive_letter]}: drive: ' $DrivePath; " +
+          "} else { " +
+            "Write-Host '#{vm_config[:drive_letter]}: drive already exists: ' $DrivePath; " +
+          "}\""
+      }
+    end
+  end
+  
+  # Function to configure Hyper-V provider
+  def configure_hyperv_provider(vm_config)
+    config.vm.provider "hyperv" do |hv|
+      hv.vmname = vm_config[:name]
+      hv.memory = vm_config[:memory]
+      hv.cpus = vm_config[:cpus]
+      hv.enable_virtualization_extensions = false
+      hv.linked_clone = false  # Always use full copy for stability
+      hv.enable_secure_boot = false
+      hv.enable_automatic_checkpoints = false
+      hv.enable_checkpoints = false
+      hv.vm_integration_services = {
+        guest_service_interface: true,
+        heartbeat: true,
+        key_value_pair_exchange: true,
+        shutdown: true,
+        time_synchronization: false,  # Prevent time sync issues
+        vss: true
+      }
+      hv.vhdx_name = "#{vm_config[:name]}_os.vhdx"
+      
+      # Additional drive configuration
+      if vm_config[:drive_letter] && vm_config[:drive_letter] != 'C'
+        hv.additional_disk_path = "#{vm_config[:name]}_#{vm_config[:drive_letter].downcase}.vhdx"
+      end
+      
+      hv.maxmemory = nil if vm_config[:fixed_size]
+      hv.enable_enhanced_session_mode = true
+    end
+  end
+  
+  # Function to configure networking
+  def configure_networking
+    # Network configuration with VLAN support
+    config.vm.network "public_network", bridge: "Virtual Switch VLAN Trunk"
+    
+    # Configure VLAN 31 for Hyper-V (can be overridden)
+    config.vm.provider "hyperv" do |hv, override|
+      hv.vlan_id = ENV['VLAN_ID'] ? ENV['VLAN_ID'].to_i : 31
+    end
+  end
+  
+  # Function for basic system provisioning
+  def provision_basic_system(vm_config)
+    config.vm.provision "powershell", name: "basic-setup", inline: <<-SHELL, env: {
+      "DRIVE_LETTER" => vm_config[:drive_letter],
+      "DRIVE_NAME" => vm_config[:drive_name],
+      "VM_TYPE" => vm_config[:vm_type] || "basic"
+    }
+      Write-Host ("=" * 60) -ForegroundColor Green
+      Write-Host "=== Basic System Setup Starting ===" -ForegroundColor Green
+      Write-Host ("=" * 60) -ForegroundColor Green
+      
+      $DriveLetter = $env:DRIVE_LETTER
+      $DriveName = $env:DRIVE_NAME
+      $VMType = $env:VM_TYPE
+      
+      # Initialize and format data drive
+      if ($DriveLetter -and $DriveLetter -ne 'C') {
+        Write-Host "Configuring $DriveLetter`: drive ($DriveName)..." -ForegroundColor Yellow
+        try {
+          # Get the disk that is not initialized (should be our new data drive)
+          $NewDisk = Get-Disk | Where-Object {$_.PartitionStyle -eq 'RAW' -and $_.Size -gt 1GB} | Select-Object -First 1
+          if ($NewDisk) {
+            Write-Host "Found uninitialized disk, setting up as $DriveLetter`: drive..." -ForegroundColor Green
+            $NewDisk | Initialize-Disk -PartitionStyle GPT -PassThru | 
+              New-Partition -DriveLetter $DriveLetter -UseMaximumSize | 
+              Format-Volume -FileSystem NTFS -NewFileSystemLabel $DriveName -Confirm:$false
+            Write-Host "$DriveLetter`: drive ($DriveName) configured successfully!" -ForegroundColor Green
+          } else {
+            Write-Host "No uninitialized disk found, $DriveLetter`: drive may already be configured" -ForegroundColor Yellow
+          }
+        } catch {
+          Write-Warning "Failed to configure $DriveLetter`: drive: $($_.Exception.Message)"
+        }
+      }
+      
+      # Set timezone to Eastern Standard Time
+      Write-Host "Setting timezone to Eastern Standard Time..." -ForegroundColor Yellow
+      try {
+        Set-TimeZone -Id "Eastern Standard Time"
+        Write-Host "Timezone set successfully" -ForegroundColor Green
+      } catch {
+        Write-Warning "Failed to set timezone: $($_.Exception.Message)"
+      }
+      
+      # Join SERVERS workgroup
+      Write-Host "Joining SERVERS workgroup..." -ForegroundColor Yellow
+      $WorkgroupName = "SERVERS"
+      
+      try {
+        $ComputerSystem = Get-CimInstance -ClassName Win32_ComputerSystem
+        if ($ComputerSystem.Workgroup -ne $WorkgroupName) {
+          Add-Computer -WorkgroupName $WorkgroupName -Force
+          Write-Host "Successfully joined workgroup: $WorkgroupName" -ForegroundColor Green
+        } else {
+          Write-Host "Already member of workgroup: $WorkgroupName" -ForegroundColor Green
+        }
+      } catch {
+        Write-Warning "Failed to join workgroup: $($_.Exception.Message)"
+      }
+      
+      # Enable ping (ICMP)
+      Write-Host "Enabling ping..." -ForegroundColor Yellow
+      try {
+        Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv4-In)" -ErrorAction SilentlyContinue
+        Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv6-In)" -ErrorAction SilentlyContinue
+        Write-Host "Ping enabled successfully" -ForegroundColor Green
+      } catch {
+        Write-Warning "Failed to enable ping: $($_.Exception.Message)"
+      }
+      
+      Write-Host ("=" * 60) -ForegroundColor Green
+      Write-Host "Basic system setup completed for $VMType VM!" -ForegroundColor Green
+      Write-Host ("=" * 60) -ForegroundColor Green
+    SHELL
+  end
+  
+  # Function for Windows Updates
+  def provision_windows_updates
+    config.vm.provision "powershell", name: "windows-updates", inline: <<-SHELL
+      Write-Host ("=" * 60) -ForegroundColor Yellow
+      Write-Host "Installing Windows Updates..." -ForegroundColor Yellow
+      Write-Host ("=" * 60) -ForegroundColor Yellow
+      
+      try {
+        # Check if PSWindowsUpdate module is available
+        if (!(Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+          Write-Host "Installing PSWindowsUpdate module..." -ForegroundColor Yellow
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Confirm:$false
+          Install-Module PSWindowsUpdate -Force -Scope AllUsers -Confirm:$false
+        }
+        
+        Import-Module PSWindowsUpdate -Force
+        
+        # Get and install critical updates only
+        Write-Host "Checking for critical updates..." -ForegroundColor Yellow
+        $updates = Get-WindowsUpdate -Category 'Critical Updates','Security Updates' -AcceptAll
+        
+        if ($updates) {
+          Write-Host "Found $($updates.Count) critical/security updates" -ForegroundColor Yellow
+          Install-WindowsUpdate -Category 'Critical Updates','Security Updates' -AcceptAll -AutoReboot:$false -Confirm:$false
+          Write-Host "Critical updates installed successfully" -ForegroundColor Green
+        } else {
+          Write-Host "No critical updates available" -ForegroundColor Green
+        }
+      } catch {
+        Write-Warning "Windows Updates failed: $($_.Exception.Message)"
+        Write-Host "Attempting alternative method..." -ForegroundColor Yellow
+        
+        # Fallback method
+        try {
+          $UpdateSession = New-Object -ComObject Microsoft.Update.Session
+          $UpdateSearcher = $UpdateSession.CreateUpdateSearcher()
+          $SearchResult = $UpdateSearcher.Search("IsInstalled=0 and Type='Software'")
+          
+          if ($SearchResult.Updates.Count -gt 0) {
+            Write-Host "Found $($SearchResult.Updates.Count) updates via COM API" -ForegroundColor Yellow
+            
+            $UpdatesToInstall = New-Object -ComObject Microsoft.Update.UpdateColl
+            foreach ($Update in $SearchResult.Updates) {
+              if ($Update.Title -notmatch 'Preview' -and $Update.InstallationBehavior.CanRequestUserInput -eq $false) {
+                $UpdatesToInstall.Add($Update) | Out-Null
+              }
+            }
+            
+            if ($UpdatesToInstall.Count -gt 0) {
+              $Installer = $UpdateSession.CreateUpdateInstaller()
+              $Installer.Updates = $UpdatesToInstall
+              $InstallationResult = $Installer.Install()
+              Write-Host "Update installation result: $($InstallationResult.ResultCode)" -ForegroundColor Green
+            }
+          } else {
+            Write-Host "No updates available" -ForegroundColor Green
+          }
+        } catch {
+          Write-Warning "Alternative update method also failed: $($_.Exception.Message)"
+          Write-Host "Continuing without updates..." -ForegroundColor Yellow
+        }
+      }
+    SHELL
+  end
+  
+  # Function for final status report
+  def provision_final_status(vm_config)
+    config.vm.provision "powershell", name: "final-status", inline: <<-SHELL, env: {
+      "DRIVE_LETTER" => vm_config[:drive_letter],
+      "DRIVE_NAME" => vm_config[:drive_name],
+      "VM_TYPE" => vm_config[:vm_type] || "Windows Server"
+    }
+      Write-Host ("=" * 60) -ForegroundColor Green
+      Write-Host "=== #{ENV['VM_TYPE'].upcase} VM READY ===" -ForegroundColor Green
+      Write-Host ("=" * 60) -ForegroundColor Green
+      
+      $DriveLetter = $env:DRIVE_LETTER
+      $DriveName = $env:DRIVE_NAME
+      $VMType = $env:VM_TYPE
+      
+      # Display system information
+      try {
+        $ComputerInfo = Get-ComputerInfo -ErrorAction SilentlyContinue
+        $TimeZone = Get-TimeZone -ErrorAction SilentlyContinue
+        $Workgroup = (Get-CimInstance -ClassName Win32_ComputerSystem).Workgroup
+        
+        Write-Host "System Information:" -ForegroundColor Yellow
+        Write-Host "  Server Name: $env:COMPUTERNAME" -ForegroundColor White
+        Write-Host "  VM Type: $VMType" -ForegroundColor White
+        Write-Host "  Workgroup: $Workgroup" -ForegroundColor White
+        if ($TimeZone) {
+          Write-Host "  Timezone: $($TimeZone.Id)" -ForegroundColor White
+        }
+        if ($ComputerInfo) {
+          Write-Host "  OS: $($ComputerInfo.WindowsProductName)" -ForegroundColor White
+          Write-Host "  Version: $($ComputerInfo.WindowsVersion)" -ForegroundColor White
+          Write-Host "  Last Boot: $($ComputerInfo.LastBootUpTime)" -ForegroundColor White
+        }
+        
+        # Storage information
+        Write-Host "`nStorage Configuration:" -ForegroundColor Yellow
+        Write-Host "  - C:\\ (OS drive)" -ForegroundColor White
+        if ($DriveLetter -and $DriveLetter -ne 'C') {
+          Write-Host "  - $DriveLetter`:\\ ($DriveName drive)" -ForegroundColor White
+        }
+        
+        # Network information
+        $NetworkAdapters = Get-NetAdapter | Where-Object Status -eq 'Up'
+        if ($NetworkAdapters) {
+          Write-Host "`nNetwork Configuration:" -ForegroundColor Yellow
+          foreach ($adapter in $NetworkAdapters) {
+            $IPConfig = Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            if ($IPConfig) {
+              Write-Host "  - $($adapter.Name): $($IPConfig.IPAddress)" -ForegroundColor White
+            }
+          }
+        }
+        
+        Write-Host "`nAccess Information:" -ForegroundColor Yellow
+        Write-Host "  RDP: vagrant rdp" -ForegroundColor White
+        Write-Host "  Username: vagrant" -ForegroundColor White
+        Write-Host "  Password: vagrant" -ForegroundColor White
+        
+        Write-Host "`n$VMType VM is ready for use!" -ForegroundColor Green
+        
+      } catch {
+        Write-Warning "Could not gather all system information: $($_.Exception.Message)"
+        Write-Host "$VMType VM setup completed!" -ForegroundColor Green
+      }
+    SHELL
+  end
+  
+  # Return the configuration functions for use in specific Vagrantfiles
+  return {
+    get_vm_config: method(:get_vm_config),
+    setup_additional_drive: method(:setup_additional_drive),
+    configure_hyperv_provider: method(:configure_hyperv_provider),
+    configure_networking: method(:configure_networking),
+    provision_basic_system: method(:provision_basic_system),
+    provision_windows_updates: method(:provision_windows_updates),
+    provision_final_status: method(:provision_final_status)
+  }
+end

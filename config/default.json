@@ -1,0 +1,135 @@
+{
+    "version": "2.0.0",
+    "metadata": {
+      "name": "Hyper-V VM Imaging Workflow",
+      "description": "Automated Windows Server VM creation with Packer and Vagrant",
+      "author": "Devon Casey",
+      "created": "2025-06-30"
+    },
+    "global": {
+      "default_os": "windows-server-2025",
+      "workgroup_name": "SERVERS",
+      "timezone": "Eastern Standard Time",
+      "default_switch": "Virtual Switch VLAN Trunk",
+      "default_vlan": 31,
+      "log_directory": "F:\\logs",
+      "temp_directory": "F:\\temp\\hyperv-workflow",
+      "boxes_directory": "boxes",
+      "max_log_age_days": 30
+    },
+    "packer": {
+      "timeout_minutes": 240,
+      "retry_attempts": 3,
+      "default_iso_paths": [
+        "F:\\Install\\Microsoft\\Windows Server\\WinServer_2025.iso"
+      ],
+      "oscdimg_paths": [
+        "${env:ProgramFiles(x86)}\\Windows Kits\\10\\Assessment and Deployment Kit\\Deployment Tools\\amd64\\Oscdimg\\oscdimg.exe",
+        "${env:ProgramFiles}\\Windows Kits\\10\\Assessment and Deployment Kit\\Deployment Tools\\amd64\\Oscdimg\\oscdimg.exe"
+      ],
+      "build_settings": {
+        "cpus": 4,
+        "memory": 4096,
+        "disk_size": 65536,
+        "generation": 2,
+        "enable_secure_boot": false,
+        "enable_tpm": false
+      }
+    },
+    "golden_image": {
+      "box_name": "windows-server-2025-golden",
+      "rebuild_interval_days": 7,
+      "scheduled_task_name": "Build-WeeklyGoldenImage",
+      "scheduled_time": "02:00",
+      "scheduled_day": "Sunday"
+    },
+    "vagrant": {
+      "default_credentials": {
+        "username": "vagrant",
+        "password": "vagrant"
+      },
+      "timeouts": {
+        "boot": 600,
+        "graceful_halt": 600,
+        "winrm": 300,
+        "winrm_retry_limit": 20,
+        "winrm_retry_delay": 10
+      },
+      "vm_defaults": {
+        "cpus": 2,
+        "memory": 2048,
+        "linked_clone": false,
+        "enable_secure_boot": false,
+        "enable_automatic_checkpoints": false,
+        "enable_enhanced_session_mode": true,
+        "vm_integration_services": {
+          "guest_service_interface": true,
+          "heartbeat": true,
+          "key_value_pair_exchange": true,
+          "shutdown": true,
+          "time_synchronization": false,
+          "vss": true
+        }
+      }
+    },
+    "environments": {
+      "barebones": {
+        "description": "Minimal Windows Server installation",
+        "memory": 2048,
+        "cpus": 2,
+        "default_drive_size": 25,
+        "features": ["basic_config", "windows_updates", "firewall_ping"]
+      },
+      "fileserver": {
+        "description": "File server with deduplication and DFS",
+        "memory": 4096,
+        "cpus": 4,
+        "default_drive_size": 100,
+        "features": ["file_services", "dfs", "deduplication", "fsrm"]
+      },
+      "dev-box": {
+        "description": "Development environment with tools",
+        "memory": 8192,
+        "cpus": 4,
+        "default_drive_size": 50,
+        "features": ["chocolatey", "vscode", "git", "python", "nodejs"]
+      },
+      "domain-controller": {
+        "description": "Active Directory Domain Services",
+        "memory": 4096,
+        "cpus": 4,
+        "default_drive_size": 50,
+        "features": ["adds", "dns", "group_policy"]
+      },
+      "iis-server": {
+        "description": "IIS Web Server with ASP.NET",
+        "memory": 4096,
+        "cpus": 4,
+        "default_drive_size": 25,
+        "features": ["iis", "aspnet", "management_tools"]
+      }
+    },
+    "validation": {
+      "min_memory": 1024,
+      "max_memory": 32768,
+      "min_cpus": 1,
+      "max_cpus": 16,
+      "min_drive_size": 10,
+      "max_drive_size": 2048,
+      "valid_drive_letters": ["D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"]
+    },
+    "security": {
+      "enable_windows_defender": false,
+      "disable_uac": true,
+      "firewall_profiles": {
+        "domain": "enabled",
+        "private": "enabled", 
+        "public": "enabled"
+      },
+      "allowed_firewall_rules": [
+        "File and Printer Sharing (Echo Request - ICMPv4-In)",
+        "File and Printer Sharing (Echo Request - ICMPv6-In)",
+        "Windows Remote Management (HTTP-In)"
+      ]
+    }
+  }

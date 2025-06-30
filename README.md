@@ -5,44 +5,184 @@
 [![Packer](https://img.shields.io/badge/Packer-1.9%2B-blue.svg)](https://www.packer.io/)
 [![Windows Server](https://img.shields.io/badge/Windows%20Server-2025-blue.svg)](https://www.microsoft.com/en-us/windows-server)
 
-A streamlined and pretty cool workflow for creating Windows Server 2025 VMs. It creates a "golden image" that is referenced to create other VMs.
+A streamlined workflow for creating Windows Server 2025 VMs with comprehensive error handling, interactive configuration, and enterprise-grade features.
 
-## 🚀 Quick Start
+## 🎯 Quick Start
 
-1. **Prerequisites Setup**
+### 1. **One-Command Setup**
 
-   ```powershell
-   # Run as Administrator
-   .\scripts\Initialize-HyperVEnvironment.ps1
-   ```
+```powershell
+# Run as Administrator - This sets up everything!
+.\scripts\Initialize-HyperVEnvironment.ps1 -Interactive
+```
 
-2. **Build Golden Image**
+### 2. **Build Your First Golden Image**
 
-   ```powershell
-   .\scripts\Build-WeeklyGoldenImage.ps1
-   ```
+```powershell
+.\scripts\Build-WeeklyGoldenImage.ps1 -Interactive
+```
 
-3. **Deploy Servers**
+### 3. **Deploy Your First VM**
 
-   ```powershell
-   cd vagrant\barebones
-   vagrant up
-   ```
+```powershell
+cd vagrant\barebones
+vagrant up --provider=hyperv
+```
 
-## ✍ Script Options
+## 📋 Prerequisites
 
-### Build-WeeklyGoldenImage.ps1 Parameters
+### System Requirements
 
-| Parameter            | Description                                                   | Example                                 |
-| -------------------- | ------------------------------------------------------------- | --------------------------------------- |
-| `-BoxName`           | Name of the Vagrant box (default: windows-server-2025-golden) | `-BoxName "windows-server-2025-golden"` |
-| `-IsoPath`           | Path to Windows Server 2025 ISO                               | `-IsoPath "D:\ISOs\WinServer_2025.iso"` |
-| `-Force`             | Force rebuild even if image is recent                         | `-Force`                                |
-| `-ScheduleWeekly`    | Create scheduled task for weekly builds                       | `-ScheduleWeekly`                       |
-| `-CheckOnly`         | Just check if rebuild is needed                               | `-CheckOnly`                            |
-| `-DaysBeforeRebuild` | Days before rebuild needed (default: 7)                       | `-DaysBeforeRebuild 14`                 |
+- **OS**: Windows 10 Pro/Enterprise or Windows Server 2016+
+- **Memory**: 8GB+ RAM (16GB recommended)
+- **Storage**: 50GB+ free disk space
+- **CPU**: Intel VT-x or AMD-V with Hyper-V support
+- **Network**: Internet connection for downloads
 
-### Usage Examples
+### Required Software
+
+The setup script will install these automatically:
+
+- HashiCorp Packer 1.9+
+- HashiCorp Vagrant 2.3+
+- Chocolatey Package Manager
+- Windows Assessment and Deployment Kit (ADK)
+- PowerShell 5.1+ (built-in on Windows 10+)
+
+## 🔧 Configuration Management
+
+### Configuration Files
+
+The system uses centralized JSON configuration:
+
+```
+config/
+├── default.json          # Main configuration
+├── environments.json     # VM environment definitions (optional)
+└── user-overrides.json   # User customizations (optional)
+```
+
+### Key Configuration Options
+
+```json
+{
+  "golden_image": {
+    "box_name": "windows-server-2025-golden",
+    "rebuild_interval_days": 7
+  },
+  "environments": {
+    "barebones": {
+      "memory": 2048,
+      "cpus": 2,
+      "default_drive_size": 25
+    },
+    "dev-box": {
+      "memory": 8192,
+      "cpus": 4,
+      "default_drive_size": 50
+    }
+  }
+}
+```
+
+## 🏗️ Project Structure (v2.0)
+
+```
+├── config/                    # 🆕 Centralized configuration
+│   ├── default.json          #     Main configuration file
+│   └── validation.schema.json #     Configuration validation
+├── scripts/
+│   ├── core/                 # 🆕 Core functionality modules
+│   │   ├── Common.ps1        #     Common functions and utilities
+│   │   ├── Build.ps1         #     Build-specific functions
+│   │   └── VagrantBox.ps1    #     Vagrant box management
+│   ├── Build-WeeklyGoldenImage.ps1 # 🔄 Enhanced build script
+│   ├── Initialize-HyperVEnvironment.ps1 # 🔄 Enhanced setup script
+│   └── utils/                # 🆕 Utility scripts
+├── packer/
+│   ├── windows-server-2025.pkr.hcl # 🔄 Updated Packer config
+│   ├── autounattend.xml       #     Unattended installation
+│   └── scripts/               #     Provisioning scripts
+├── vagrant/
+│   ├── shared/               # 🆕 Shared Vagrant components
+│   │   └── common.rb         #     Common Ruby functions
+│   ├── barebones/            # 🔄 Enhanced environments
+│   ├── fileserver/
+│   ├── dev-box/
+│   ├── domain-controller/
+│   └── iis-server/
+└── docs/                     # 🆕 Enhanced documentation
+    ├── troubleshooting.md
+    ├── advanced-usage.md
+    └── api-reference.md
+```
+
+## 🎮 Interactive Mode
+
+### Setup Wizard
+
+```powershell
+.\scripts\Initialize-HyperVEnvironment.ps1 -Interactive
+```
+
+Features:
+
+- ✨ **Welcome Screen**: System information and prerequisites check
+- 🔧 **Component Selection**: Choose what to install/configure
+- 🌐 **Network Configuration**: Guided Hyper-V networking setup
+- ✅ **Validation**: Comprehensive system validation
+- 📊 **Progress Tracking**: Real-time progress indicators
+
+### Build Wizard
+
+```powershell
+.\scripts\Build-WeeklyGoldenImage.ps1 -Interactive
+```
+
+Features:
+
+- 🎯 **Configuration Menu**: Customize build settings
+- 📈 **Build Status**: Real-time build progress and ETA
+- 🔍 **System Information**: Detailed environment status
+- ⚙️ **Settings Management**: Save and load custom configurations
+
+## 🏢 Available VM Environments
+
+| Environment           | Description             | Memory | CPUs | Use Case                         |
+| --------------------- | ----------------------- | ------ | ---- | -------------------------------- |
+| **barebones**         | Minimal Windows Server  | 2GB    | 2    | Testing, minimal deployments     |
+| **fileserver**        | File & Storage Server   | 4GB    | 4    | File sharing, storage management |
+| **dev-box**           | Development Environment | 8GB    | 4    | Software development             |
+| **domain-controller** | Active Directory        | 4GB    | 4    | Domain services, authentication  |
+| **iis-server**        | Web Server              | 4GB    | 4    | Web hosting, applications        |
+
+### Deployment Examples
+
+```powershell
+# Interactive deployment with custom configuration
+cd vagrant\dev-box
+set VAGRANT_INTERACTIVE=true
+vagrant up --provider=hyperv
+
+# Quick deployment with defaults
+cd vagrant\fileserver
+vagrant up --provider=hyperv
+
+# Check VM status
+vagrant status
+vagrant rdp  # Connect via RDP
+```
+
+## 🔄 Golden Image Management
+
+### Automatic Weekly Builds
+
+```powershell
+# Set up automatic weekly builds
+.\scripts\Build-WeeklyGoldenImage.ps1 -ScheduleWeekly
+```
+
+### Manual Build Options
 
 ```powershell
 # Check if rebuild is needed
@@ -51,227 +191,188 @@ A streamlined and pretty cool workflow for creating Windows Server 2025 VMs. It 
 # Force rebuild regardless of age
 .\scripts\Build-WeeklyGoldenImage.ps1 -Force
 
-# Build with custom settings
-.\scripts\Build-WeeklyGoldenImage.ps1 -BoxName "windows-server-2025-golden" -DaysBeforeRebuild 14
-
-# Remove and recreate scheduled task
-.\scripts\Build-WeeklyGoldenImage.ps1 -ScheduleWeekly
+# Build with custom configuration
+.\scripts\Build-WeeklyGoldenImage.ps1 -ConfigPath ".\my-config.json"
 ```
 
-## ⚙️ Workflow
-
-This guide explains how to use the weekly golden image build process for Windows Server 2025.
-
-## Overview
-
-The golden image workflow allows you to:
-
-1. Build a fresh Windows Server 2025 image weekly with latest updates
-2. Package it as a Vagrant box named `windows-server-2025-golden`
-3. Use this golden image as the base for all your Vagrant environments
-
-## Getting Started (Complete Setup)
-
-Follow these steps to set up the golden image workflow from scratch:
-
-### Prerequisites
-
-1. **Hyper-V** installed and enabled
-2. **HashiCorp Packer** installed (`choco install packer` or download from HashiCorp)
-3. **HashiCorp Vagrant** installed (`choco install vagrant` or download from HashiCorp)
-4. **Windows Server ISO** downloaded and accessible
-5. **Administrative Privileges** user running script needs to be a Hyper-V Administrator
-6. **Windows SDK 10** installed
-
-### Step 1: Clone and Setup
+### Build Status Monitoring
 
 ```powershell
-# Clone the repository
-git clone <repository-url> vagrant-hyperv-setup
-cd vagrant-hyperv-setup
-
-# Initialize Hyper-V environment (creates Vagrant Virtual Switch if needed)
-.\scripts\Initialize-HyperVEnvironment.ps1
-```
-
-### Step 2: Prepare ISO
-
-```powershell
-# Option A: Place ISO in default location
-# Copy your Windows Server 2025 ISO to: F:\Install\Microsoft\Windows Server\WinServer_2025.iso
-
-# Option B: Note your ISO path for custom location
-# Example: D:\ISOs\WinServer_2025.iso
-```
-
-### Step 3: Build Your First Golden Image
-
-```powershell
-# Build with default ISO location
-.\scripts\Build-WeeklyGoldenImage.ps1
-
-# OR build with custom ISO path
-.\scripts\Build-WeeklyGoldenImage.ps1 -IsoPath "D:\ISOs\WinServer_2025.iso"
-
-# This will take 30-60 minutes and will:
-# 1. Run Packer to build the base Windows Server 2025 VM
-# 2. Install essential packages and configure WinRM
-# 3. Package the result as a Vagrant box named "windows-server-2025-golden"
-# 4. Add the box to your local Vagrant installation
-```
-
-### Step 4: Deploy Your First VM
-
-Choose from the available VM environments:
-
-#### Available VM Types
-
-| Environment           | Purpose                 | Features                                         | Use Case                         |
-| --------------------- | ----------------------- | ------------------------------------------------ | -------------------------------- |
-| **barebones**         | Minimal Windows Server  | Basic OS + Windows Updates                       | Testing, minimal deployments     |
-| **fileserver**        | File & Storage Server   | File Services, DFS, FSRM, **Data Deduplication** | File sharing, storage management |
-| **dev-box**           | Development Environment | Dev tools, VS Code, Git                          | Software development             |
-| **domain-controller** | Active Directory        | AD DS, DNS, Group Policy                         | Domain services, authentication  |
-| **iis-server**        | Web Server              | IIS, ASP.NET, management tools                   | Web hosting, applications        |
-
-#### Deploy Commands
-
-```powershell
-# Deploy a basic Windows Server (minimal configuration)
-cd vagrant\barebones
-vagrant up --provider=hyperv
-
-# Deploy a file server with deduplication on second drive
-cd ..\fileserver
-vagrant up --provider=hyperv
-
-# Deploy a development box with tools
-cd ..\dev-box
-vagrant up --provider=hyperv
-
-# Deploy a domain controller
-cd ..\domain-controller
-vagrant up --provider=hyperv
-
-# Deploy an IIS web server
-cd ..\iis-server
-vagrant up --provider=hyperv
-```
-
-### Step 5: Connect to Your VM
-
-```powershell
-# Connect via RDP
-vagrant rdp
-
-# Or check VM status
-vagrant status
-
-# Default credentials:
-# Username: vagrant
-# Password: vagrant
-```
-
-### Step 6: Set Up Weekly Automation (Optional)
-
-```powershell
-# Create scheduled task for weekly golden image rebuilds
-.\scripts\Build-WeeklyGoldenImage.ps1 -ScheduleWeekly
-```
-
-### Step 7: Validate Your Setup
-
-```powershell
-# Verify Packer is installed
-packer version
-
-# Verify Vagrant is installed
-vagrant version
-
-# Check if golden image was created
-vagrant box list | findstr "windows-server-2025-golden"
-
-# Verify Hyper-V virtual switch
-Get-VMSwitch | Where-Object { $_.Name -like "*VLAN*" }
-
-# Test VM deployment (optional)
+# View current golden image status
 .\scripts\Build-WeeklyGoldenImage.ps1 -CheckOnly
+
+# Output example:
+# Golden Image Status:
+# Box: windows-server-2025-golden
+# Age: 3 days
+# Last Modified: 2025-06-27 14:30:15
+# Rebuild Needed: No
 ```
 
-## How It Works
+## 🔧 Advanced Configuration
 
-1. **Packer Build**: Uses `packer\windows-server-2025.pkr.hcl` to build a fresh Windows Server 2025 VM with:
+### Custom VM Configuration
 
-   - Latest Windows updates
-   - Essential packages
-   - Vagrant user configured
-   - WinRM enabled
-
-2. **Box Creation**: Packages the Packer output as a Vagrant box using `scripts\New-VagrantBox.ps1`
-
-3. **Vagrant Integration**: All Vagrantfiles use `config.vm.box = "windows-server-2025-golden"`
-
-## Maintenance
-
-### Weekly Process
-
-The automated process will:
-
-- Check if the current golden image is older than 7 days
-- Build a new image with latest updates if needed
-- Package and register it with Vagrant
-- Replace the previous golden image
-
-### Manual Maintenance
-
-```powershell
-# List current Vagrant boxes
-vagrant box list
-
-# Remove old boxes (if needed)
-vagrant box remove windows-server-2025-golden --provider hyperv
-
-# Check scheduled task status
-Get-ScheduledTask -TaskName "Build-WeeklyGoldenImage"
-
-# View task history
-Get-ScheduledTask -TaskName "Build-WeeklyGoldenImage" | Get-ScheduledTaskInfo
-```
-
-### Updating Running VMs
-
-When a new golden image is built, existing VMs continue using the old image. To update them:
-
-```powershell
-# Example: Update fileserver VM
-cd vagrant\fileserver
-vagrant destroy -f
-vagrant up --provider=hyperv
-
-# Or update all environments
-$environments = @("barebones", "fileserver", "dev-box", "domain-controller", "iis-server")
-foreach ($env in $environments) {
-    cd vagrant\$env
-    vagrant destroy -f
-    vagrant up --provider=hyperv
-    cd ..\..
+```ruby
+# In your environment's Vagrantfile
+vm_config = {
+  name: "my-custom-server",
+  memory: 6144,
+  cpus: 3,
+  drive_size: 75,
+  fixed_size: true
 }
 ```
 
-## Troubleshooting
+### Environment Variables
 
-### Build Logs
+```powershell
+# Enable interactive mode
+$env:VAGRANT_INTERACTIVE = "true"
 
-Build logs are displayed in the console. For scheduled builds, check:
+# Custom configuration path
+$env:HYPERV_CONFIG_PATH = "C:\my-configs\hyperv.json"
 
-- Event Viewer > Windows Logs > Application
-- Task Scheduler > Task Scheduler Library > "Build-WeeklyGoldenImage"
+# Debug mode
+$env:PACKER_LOG = "1"
+```
 
-## Integration with Development Workflow
+### Network Configuration Options
 
-1. **Weekly**: Automated golden image build (Sunday 2 AM)
-2. **Daily**: Use existing VMs for development
-3. **As Needed**: Recreate VMs when fresh golden image is needed
-4. **Testing**: Deploy clean VMs for testing using latest golden image
+```powershell
+# External switch (production)
+.\scripts\Initialize-HyperVEnvironment.ps1 -ConfigureNetworking
 
-This workflow ensures all your VMs start from a consistent, up-to-date baseline while minimizing build time and storage requirements.
+# Internal switch with NAT (testing)
+# Selected automatically during interactive setup
+```
+
+## 🚨 Troubleshooting
+
+### Common Issues and Solutions
+
+#### "Golden image box not found"
+
+```powershell
+# Solution: Build the golden image first
+.\scripts\Build-WeeklyGoldenImage.ps1 -Force
+```
+
+#### "Hyper-V Administrators group" error
+
+```powershell
+# Solution: Add user to group and reboot
+net localgroup "Hyper-V Administrators" %USERNAME% /add
+# Then reboot or log out/in
+```
+
+#### "oscdimg.exe not found"
+
+```powershell
+# Solution: Reinstall Windows ADK
+.\scripts\Initialize-HyperVEnvironment.ps1 -Force
+```
+
+#### VM fails to start
+
+```powershell
+# Check Hyper-V virtual switch
+Get-VMSwitch
+# Recreate if needed
+.\scripts\Initialize-HyperVEnvironment.ps1 -ConfigureNetworking -Force
+```
+
+### Debug Mode
+
+```powershell
+# Enable verbose logging
+$VerbosePreference = "Continue"
+.\scripts\Build-WeeklyGoldenImage.ps1 -Verbose
+
+# Enable Packer debug logging
+$env:PACKER_LOG = "1"
+$env:PACKER_LOG_PATH = "C:\logs\packer-debug.log"
+```
+
+## 📊 Monitoring and Maintenance
+
+### Health Checks
+
+```powershell
+# System health check
+.\scripts\Test-SystemHealth.ps1
+
+# VM environment validation
+.\scripts\Test-VMEnvironments.ps1
+
+# Golden image validation
+.\scripts\Test-GoldenImage.ps1
+```
+
+### Maintenance Tasks
+
+```powershell
+# Clean up old VMs
+.\scripts\Cleanup-OldVMs.ps1
+
+# Update Vagrant boxes
+vagrant box outdated --global
+vagrant box update --box windows-server-2025-golden
+
+# Clean Packer cache
+.\scripts\Cleanup-PackerCache.ps1
+```
+
+### Security Best Practices
+
+```powershell
+# Change default credentials (in config/default.json)
+{
+  "vagrant": {
+    "default_credentials": {
+      "username": "vmadmin",
+      "password": "SecurePassword123!"
+    }
+  }
+}
+
+# Enable additional firewall rules only as needed
+# Configure VLAN isolation for sensitive environments
+```
+
+## 🎯 Performance Optimization
+
+### Resource Allocation
+
+```json
+{
+  "environments": {
+    "high-performance": {
+      "memory": 16384,
+      "cpus": 8,
+      "enable_enhanced_session_mode": true,
+      "linked_clone": false
+    }
+  }
+}
+```
+
+## 🤝 Development Setup
+
+```powershell
+# Clone the repository
+git clone <repository-url>
+cd hyperv-vm-workflow
+
+# Install development dependencies
+.\scripts\Install-DevDependencies.ps1
+
+# Run tests
+.\scripts\Test-AllComponents.ps1
+```
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---

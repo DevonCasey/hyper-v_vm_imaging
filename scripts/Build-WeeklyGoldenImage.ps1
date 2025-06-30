@@ -1,19 +1,19 @@
 <#
 .SYNOPSIS
-    Weekly Golden Image Build Script for Windows Server 2022
+    Enhanced Weekly Golden Image Build Script for Windows Server 2025
 
 .DESCRIPTION
-    Automates the creation of Windows Server 2022 golden images using Packer and Vagrant.
-    Includes automatic ISO preparation with unattended installation configuration.
+    Automates the creation of Windows Server 2025 golden images using Packer and Vagrant.
+    Enhanced with improved error handling, progress reporting, and modular design.
 
 .PARAMETER BoxName
-    Name of the Vagrant box to create (default: windows-server-2022-golden)
+    Name of the Vagrant box to create (uses config default if not specified)
 
 .PARAMETER IsoPath
-    Path to the Windows Server 2022 ISO file
+    Path to the Windows Server 2025 ISO file (auto-detected if not specified)
 
 .PARAMETER ConfigPath
-    Path to configuration file (JSON format)
+    Path to custom configuration file (JSON format)
 
 .PARAMETER Force
     Force rebuild even if the image is recent
@@ -25,33 +25,44 @@
     Only check if rebuild is needed (returns exit code)
 
 .PARAMETER DaysBeforeRebuild
-    Number of days before forcing a rebuild (default: 7)
+    Number of days before forcing a rebuild (uses config default if not specified)
+
+.PARAMETER Interactive
+    Enable interactive mode with menus and prompts
 
 .EXAMPLE
     .\Build-WeeklyGoldenImage.ps1
-    Build with default settings
+    Build with default settings (auto-detect ISO, use config defaults)
 
 .EXAMPLE
-    .\Build-WeeklyGoldenImage.ps1 -Force
-    Force rebuild
+    .\Build-WeeklyGoldenImage.ps1 -Force -Interactive
+    Force rebuild with interactive prompts
 
 .EXAMPLE
-    .\Build-WeeklyGoldenImage.ps1 -ConfigPath ".\config.json"
-    Use external configuration file
+    .\Build-WeeklyGoldenImage.ps1 -ConfigPath ".\custom-config.json"
+    Use custom configuration file
+
+.EXAMPLE
+    .\Build-WeeklyGoldenImage.ps1 -CheckOnly
+    Check if rebuild is needed without building
+
+.NOTES
+    Version: 2.0.0
+    Requires: PowerShell 5.1+, Packer, Vagrant, Hyper-V, Windows ADK
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'Build')]
 param(
     [Parameter(ParameterSetName = 'Build')]
     [Parameter(ParameterSetName = 'Check')]
-    [string]$BoxName = "windows-server-2022-golden",
+    [string]$BoxName,
     
     [Parameter(ParameterSetName = 'Build')]
     [ValidateScript({
-            if (Test-Path $_ -PathType Leaf) { $true }
+            if (-not $_ -or (Test-Path $_ -PathType Leaf)) { $true }
             else { throw "ISO file not found: $_" }
         })]
-    [string]$IsoPath = "F:\Install\Microsoft\Windows Server\WinServer_2022.iso",
+    [string]$IsoPath,
     
     [Parameter(ParameterSetName = 'Build')]
     [Parameter(ParameterSetName = 'Check')]
@@ -73,693 +84,299 @@ param(
     [Parameter(ParameterSetName = 'Build')]
     [Parameter(ParameterSetName = 'Check')]
     [ValidateRange(1, 30)]
-    [int]$DaysBeforeRebuild = 7
+    [int]$DaysBeforeRebuild,
+    
+    [Parameter(ParameterSetName = 'Build')]
+    [switch]$Interactive
 )
 
-# Script configuration with defaults
-$script:Config = @{
-    LogDirectory        = "C:\logs"
-    TempDirectory       = $env:TEMP
-    MaxLogAgeDays       = 30
-    BuildTimeoutMinutes = 240
-    RetryAttempts       = 3
-    OscdimgPath         = $null
+#region Module Imports
+# Import core functions
+$coreModulePath = Join-Path $PSScriptRoot "core\Common.ps1"
+if (Test-Path $coreModulePath) {
+    . $coreModulePath
 }
-
-# Script-level variables
-$script:LogPath = $null
-$script:TranscriptStarted = $false
-
-#region Logging Functions
-function Initialize-Logging {
-    [CmdletBinding()]
-    param()
-    
-    try {
-        if (-not (Test-Path $script:Config.LogDirectory)) {
-            $null = New-Item -ItemType Directory -Path $script:Config.LogDirectory -Force
-        }
-        
-        $timestamp = Get-Date -Format 'yyyy-MM-dd'
-        $scriptName = [System.IO.Path]::GetFileNameWithoutExtension($MyInvocation.ScriptName)
-        $script:LogPath = Join-Path $script:Config.LogDirectory "${scriptName}_${timestamp}.log"
-        
-        Start-Transcript -Path $script:LogPath -Force
-        $script:TranscriptStarted = $true
-        
-        Write-Information "Logging initialized: $script:LogPath" -InformationAction Continue
-        
-        # Clean old logs
-        Get-ChildItem $script:Config.LogDirectory -Filter "*.log" -ErrorAction SilentlyContinue | 
-        Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$script:Config.MaxLogAgeDays) } |
-        Remove-Item -Force -ErrorAction SilentlyContinue
-    }
-    catch {
-        Write-Warning "Failed to initialize logging: $($_.Exception.Message)"
-    }
-}
-
-function Stop-Logging {
-    [CmdletBinding()]
-    param()
-    
-    if ($script:TranscriptStarted) {
-        try {
-            Stop-Transcript
-            $script:TranscriptStarted = $false
-        }
-        catch {
-            Write-Warning "Failed to stop transcript: $($_.Exception.Message)"
-        }
-    }
+else {
+    throw "Core module not found: $coreModulePath. Please ensure the project structure is intact."
 }
 #endregion
 
-#region Configuration Functions
-function Import-Configuration {
-    [CmdletBinding()]
-    param([string]$Path)
-
-    if (-not $Path -or -not (Test-Path $Path)) {
-        Write-Verbose "No configuration file specified or found, using defaults"
-        return
-    }
-    
-    try {
-        $configData = Get-Content $Path -Raw | ConvertFrom-Json
-        
-        # Merge with default configuration
-        foreach ($property in $configData.PSObject.Properties) {
-            $script:Config[$property.Name] = $property.Value
-        }
-        
-        Write-Information "Configuration loaded from: $Path" -InformationAction Continue
-    }
-    catch {
-        Write-Warning "Failed to load configuration file: $($_.Exception.Message)"
-    }
-}
+#region Script Variables
+$script:effectiveBoxName = $null
+$script:effectiveIsoPath = $null
+$script:effectiveDaysBeforeRebuild = $null
 #endregion
 
-#region Prerequisites Functions
-function Test-Prerequisites {
+#region Interactive Functions
+function Show-InteractiveMenu {
+    <#
+    .SYNOPSIS
+        Shows interactive menu for build options
+    #>
     [CmdletBinding()]
     param()
     
-    $missing = @()
+    Clear-Host
+    Write-Host "=" * 70 -ForegroundColor Green
+    Write-Host "   Windows Server 2025 Golden Image Builder v2.0" -ForegroundColor Green
+    Write-Host "=" * 70 -ForegroundColor Green
+    Write-Host ""
     
-    # Check for required tools
-    $requiredTools = @(
-        @{ Name = 'packer'; Command = 'packer version' },
-        @{ Name = 'vagrant'; Command = 'vagrant --version' }
-    )
+    $currentBox = Get-CurrentBoxInfo -BoxName $script:effectiveBoxName
     
-    foreach ($tool in $requiredTools) {
-        try {
-            $null = Invoke-Expression $tool.Command 2>$null
-            Write-Verbose "$($tool.Name) found"
-        }
-        catch {
-            $missing += $tool.Name
-        }
+    # Display current status
+    Write-Host "Current Configuration:" -ForegroundColor Yellow
+    Write-Host "  Box Name: $script:effectiveBoxName" -ForegroundColor White
+    Write-Host "  ISO Path: $script:effectiveIsoPath" -ForegroundColor White
+    Write-Host "  Rebuild Interval: $script:effectiveDaysBeforeRebuild days" -ForegroundColor White
+    
+    if ($currentBox.Exists) {
+        $ageColor = if ($currentBox.NeedsRebuild) { "Red" } else { "Green" }
+        Write-Host "  Current Box Age: $($currentBox.AgeDays) days" -ForegroundColor $ageColor
+        Write-Host "  Rebuild Required: $($currentBox.NeedsRebuild)" -ForegroundColor $ageColor
+    }
+    else {
+        Write-Host "  Current Box: Not Found" -ForegroundColor Red
     }
     
-    # Find oscdimg.exe
-    $oscdimgPaths = @(
-        "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe",
-        "${env:ProgramFiles}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
-    )
+    Write-Host ""
+    Write-Host "Available Actions:" -ForegroundColor Yellow
+    Write-Host "  1. Build Golden Image Now" -ForegroundColor White
+    Write-Host "  2. Force Rebuild (ignore age)" -ForegroundColor White
+    Write-Host "  3. Check Build Status Only" -ForegroundColor White
+    Write-Host "  4. Schedule Weekly Builds" -ForegroundColor White
+    Write-Host "  5. Configure Settings" -ForegroundColor White
+    Write-Host "  6. View System Information" -ForegroundColor White
+    Write-Host "  Q. Quit" -ForegroundColor White
+    Write-Host ""
     
-    $oscdimgFound = $false
-    foreach ($path in $oscdimgPaths) {
-        if (Test-Path $path) {
-            $script:Config.OscdimgPath = $path
-            $oscdimgDir = Split-Path $path -Parent
-            
-            if ($env:PATH -notlike "*$oscdimgDir*") {
-                $env:PATH += ";$oscdimgDir"
+    do {
+        $choice = Read-Host "Select an option (1-6, Q)"
+        
+        switch ($choice.ToUpper()) {
+            "1" { return "build" }
+            "2" { 
+                $script:Force = $true
+                return "build"
             }
-            
-            $oscdimgFound = $true
-            Write-Verbose "oscdimg.exe found at: $path"
-            break
-        }
-    }
-    
-    if (-not $oscdimgFound) {
-        $missing += 'oscdimg.exe (Windows ADK)'
-    }
-    
-    if ($missing.Count -gt 0) {
-        throw "Missing required tools: $($missing -join ', ')"
-    }
-    
-    Write-Information "All prerequisites validated successfully" -InformationAction Continue
-}
-
-#region ISO Functions (Updated with Null Checking)
-function Test-IsoFile {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [string]$Path
-    )
-    
-    Write-Information "Validating ISO file: $Path" -InformationAction Continue
-    
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        throw "ISO path is null or empty"
-    }
-    
-    if (-not (Test-Path $Path)) {
-        throw "ISO file not found at: $Path"
-    }
-    
-    try {
-        # Verify it's a valid ISO by attempting to mount it
-        $mountResult = Mount-DiskImage -ImagePath $Path -PassThru -ErrorAction Stop
-        $volume = $mountResult | Get-Volume -ErrorAction Stop
-        $null = Dismount-DiskImage -ImagePath $Path -ErrorAction Stop
-        
-        Write-Information "ISO validated successfully: $Path" -InformationAction Continue
-        return $true
-    }
-    catch {
-        throw "Invalid or corrupted ISO file: $($_.Exception.Message)"
-    }
-}
-#endregion
-
-#region Main Functions (Updated with Better Error Handling)
-function Invoke-GoldenImageBuild {
-    [CmdletBinding()]
-    param()
-    
-    try {
-        Write-Host "=== Weekly Golden Image Build Process ===" -ForegroundColor Green
-        Write-Host "Building Windows Server 2022 golden image..." -ForegroundColor Yellow
-        
-        # Debug: Show all script-level variables
-        Write-Host "`n=== Debug Information ===" -ForegroundColor Cyan
-        Write-Host "BoxName: '$BoxName'" -ForegroundColor Gray
-        Write-Host "IsoPath: '$IsoPath'" -ForegroundColor Gray
-        Write-Host "PSScriptRoot: '$PSScriptRoot'" -ForegroundColor Gray
-        Write-Host "Current Location: '$(Get-Location)'" -ForegroundColor Gray
-        
-        # Validate required variables are not null
-        if ([string]::IsNullOrWhiteSpace($BoxName)) {
-            throw "BoxName parameter is null or empty"
-        }
-        
-        if ([string]::IsNullOrWhiteSpace($IsoPath)) {
-            throw "IsoPath parameter is null or empty. Please specify the path to Windows Server 2022 ISO file."
-        }
-        
-        Write-Host "Box Name: $BoxName"
-        Write-Host "ISO Path: $IsoPath"
-        Write-Host "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-        
-        $buildStartTime = Get-Date
-        
-        # Get absolute paths for all project directories
-        if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
-            throw "PSScriptRoot is null - cannot determine project structure"
-        }
-        
-        $projectRoot = Split-Path $PSScriptRoot -Parent
-        $packerDir = Join-Path $projectRoot "packer"
-        $scriptsDir = Join-Path $projectRoot "scripts"
-        $vagrantDir = Join-Path $projectRoot "vagrant"
-        $boxesDir = Join-Path $projectRoot "boxes"
-        
-        Write-Information "Project root: $projectRoot" -InformationAction Continue
-        Write-Information "Packer directory: $packerDir" -InformationAction Continue
-        
-        # Validate project structure
-        if (-not (Test-Path $projectRoot)) {
-            throw "Project root directory not found: $projectRoot"
-        }
-        if (-not (Test-Path $packerDir)) {
-            throw "Packer directory not found: $packerDir"
-        }
-        
-        # Test prerequisites
-        Test-Prerequisites
-        
-        # Validate and convert to absolute path for ISO
-        Write-Information "Converting ISO path to absolute..." -InformationAction Continue
-        if ([string]::IsNullOrWhiteSpace($IsoPath)) {
-            throw "IsoPath is null or empty"
-        }
-        
-        $absoluteIsoPath = if ([System.IO.Path]::IsPathRooted($IsoPath)) { 
-            $IsoPath 
-        }
-        else { 
-            $resolvedPath = Join-Path $PWD $IsoPath
-            Write-Information "Resolved relative path '$IsoPath' to '$resolvedPath'" -InformationAction Continue
-            $resolvedPath
-        }
-        
-        Write-Information "Using absolute ISO path: $absoluteIsoPath" -InformationAction Continue
-        
-        # Validate the ISO file exists and is valid
-        if ([string]::IsNullOrWhiteSpace($absoluteIsoPath)) {
-            throw "Absolute ISO path is null or empty after resolution"
-        }
-        
-        Test-IsoFile -Path $absoluteIsoPath
-        
-        # Check if rebuild is needed
-        if (-not $Force) {
-            $needsRebuild = Test-BoxAge -BoxName $BoxName -MaxAgeDays $DaysBeforeRebuild
-            if (-not $needsRebuild) {
-                Write-Host "Golden image is still fresh. Use -Force to rebuild anyway." -ForegroundColor Green
+            "3" { return "check" }
+            "4" { return "schedule" }
+            "5" { 
+                Show-ConfigurationMenu
+                Show-InteractiveMenu
                 return
             }
-        }
-        
-        # Prepare absolute paths for all files
-        $unattendXmlPath = Join-Path $packerDir "autounattend.xml"
-        $packerConfigPath = Join-Path $packerDir "windows-server-2022.pkr.hcl"
-        $customIsoPath = Join-Path $packerDir "custom_windows_server_2022.iso"
-        
-        Write-Information "Unattend XML path: $unattendXmlPath" -InformationAction Continue
-        Write-Information "Packer config path: $packerConfigPath" -InformationAction Continue
-        Write-Information "Custom ISO path: $customIsoPath" -InformationAction Continue
-        
-        # Validate required files exist
-        if (-not (Test-Path $unattendXmlPath)) {
-            throw "Unattend XML file not found: $unattendXmlPath"
-        }
-        if (-not (Test-Path $packerConfigPath)) {
-            throw "Packer configuration file not found: $packerConfigPath"
-        }
-        
-        # Create boxes directory if it doesn't exist
-        if (-not (Test-Path $boxesDir)) {
-            Write-Information "Creating boxes directory: $boxesDir" -InformationAction Continue
-            $null = New-Item -ItemType Directory -Path $boxesDir -Force
-        }
-        
-        # Remove existing custom ISO
-        if (Test-Path $customIsoPath) {
-            Write-Information "Removing existing custom ISO: $customIsoPath" -InformationAction Continue
-            Remove-Item $customIsoPath -Force
-        }
-        
-        # Create custom ISO with autounattend.xml embedded
-        Write-Information "Creating custom Windows ISO with embedded autounattend.xml..." -InformationAction Continue
-        New-CustomIso -SourceIsoPath $absoluteIsoPath -OutputIsoPath $customIsoPath -UnattendXmlPath $unattendXmlPath
-        
-        # Execute Packer build with absolute paths
-        Write-Information "Starting Packer build..." -InformationAction Continue
-        $null = Invoke-PackerBuild -CustomIsoPath $customIsoPath -PackerConfigPath $packerConfigPath -PackerWorkingDir $packerDir
-        
-        # Package as Vagrant box
-        Write-Information "Packaging as Vagrant box..." -InformationAction Continue
-        $boxScriptPath = Join-Path $scriptsDir "New-VagrantBox.ps1"
-        $packerOutputDir = Join-Path $packerDir "output-hyperv-iso"
-        
-        if ($Force) {
-            try {
-                & vagrant box remove $BoxName --provider hyperv --force 2>$null
-                Write-Information "Removed existing box: $BoxName" -InformationAction Continue
+            "6" { 
+                Show-SystemInformation
+                Read-Host "`nPress Enter to continue"
+                Show-InteractiveMenu
+                return
             }
-            catch {
-                Write-Verbose "No existing box to remove"
+            "Q" { return "quit" }
+            default { 
+                Write-Host "Invalid selection. Please choose 1-6 or Q." -ForegroundColor Red
             }
         }
-        
-        if (Test-Path $boxScriptPath) {
-            $boxArgs = @{
-                BoxName               = $BoxName
-                PackerOutputDirectory = $packerOutputDir
-                VagrantBoxDirectory   = $boxesDir
-            }
-            
-            & $boxScriptPath @boxArgs
-        }
-        else {
-            Write-Warning "Box packaging script not found: $boxScriptPath"
-        }
-        
-        # Clean up temporary files
-        Write-Information "Cleaning up temporary files..." -InformationAction Continue
-        if (Test-Path $customIsoPath) {
-            Remove-Item $customIsoPath -Force -ErrorAction SilentlyContinue
-        }
-        
-        # Final summary
-        $totalDuration = (Get-Date) - $buildStartTime
-        $nextBuildDate = (Get-Date).AddDays($DaysBeforeRebuild)
-        
-        Write-Host "`n=== Golden Image Build Complete ===" -ForegroundColor Green
-        Write-Host "Total time: $($totalDuration.ToString('hh\:mm\:ss'))"
-        Write-Host "Box name: $BoxName"
-        Write-Host "Built on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-        Write-Host "Next build needed after: $($nextBuildDate.ToString('yyyy-MM-dd'))"
-        
-        # Display deployment instructions with absolute paths
-        Write-Host "`nYou can now deploy VMs using:" -ForegroundColor Yellow
-        $environments = @("barebones", "fileserver", "dev-box", "domain-controller", "iis-server")
-        foreach ($env in $environments) {
-            $envPath = Join-Path $vagrantDir $env
-            Write-Host "  Set-Location '$envPath'; vagrant up --provider=hyperv" -ForegroundColor White
-        }
-        
-        # Check for running VMs
-        $runningVMs = Get-RunningVagrantVMs -VagrantBaseDir $vagrantDir
-        if ($runningVMs.Count -gt 0) {
-            Write-Host "`nWARNING: The following VMs are running with the old golden image:" -ForegroundColor Yellow
-            $runningVMs | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
-            Write-Host "Consider recreating them to use the new golden image:" -ForegroundColor Yellow
-            $runningVMs | ForEach-Object {
-                $envPath = Join-Path $vagrantDir $_
-                Write-Host "  Set-Location '$envPath'; vagrant destroy -f; vagrant up --provider=hyperv" -ForegroundColor White
-            }
-        }
-        else {
-            Write-Host "No running VMs detected - all future VMs will use the new golden image" -ForegroundColor Green
-        }
-    }
-    catch {
-        Write-Error "Golden image build failed: $($_.Exception.Message)"
-        Write-Host "`n=== Error Debug Information ===" -ForegroundColor Red
-        Write-Host "Error Type: $($_.Exception.GetType().FullName)" -ForegroundColor Gray
-        Write-Host "Error Message: $($_.Exception.Message)" -ForegroundColor Gray
-        Write-Host "Stack Trace: $($_.ScriptStackTrace)" -ForegroundColor Gray
-        throw
-    }
+    } while ($true)
 }
-#endregion
 
-#region ISO Functions
-function New-UnattendedISO {
+function Show-ConfigurationMenu {
+    <#
+    .SYNOPSIS
+        Shows configuration options menu
+    #>
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$AutounattendPath,
-        
-        [Parameter(Mandatory)]
-        [string]$OutputIsoPath,
-        
-        [Parameter()]
-        [string]$ScriptsPath
-    )
+    param()
     
-    $workingDir = Join-Path $script:Config.TempDirectory "unattend_iso_$(Get-Random)"
+    Clear-Host
+    Write-Host "=" * 70 -ForegroundColor Cyan
+    Write-Host "   Configuration Settings" -ForegroundColor Cyan
+    Write-Host "=" * 70 -ForegroundColor Cyan
+    Write-Host ""
+    
+    Write-Host "Current Settings:" -ForegroundColor Yellow
+    Write-Host "  1. Box Name: $script:effectiveBoxName" -ForegroundColor White
+    Write-Host "  2. ISO Path: $script:effectiveIsoPath" -ForegroundColor White
+    Write-Host "  3. Rebuild Interval: $script:effectiveDaysBeforeRebuild days" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  R. Reset to Defaults" -ForegroundColor White
+    Write-Host "  B. Back to Main Menu" -ForegroundColor White
+    Write-Host ""
+    
+    do {
+        $choice = Read-Host "Select setting to change (1-3, R, B)"
+        
+        switch ($choice.ToUpper()) {
+            "1" {
+                $newBoxName = Read-Host "Enter new box name [$script:effectiveBoxName]"
+                if ($newBoxName) {
+                    $script:effectiveBoxName = Get-SafeVMName -Name $newBoxName
+                    Write-Host "Box name updated to: $script:effectiveBoxName" -ForegroundColor Green
+                }
+                break
+            }
+            "2" {
+                $newIsoPath = Read-Host "Enter new ISO path [$script:effectiveIsoPath]"
+                if ($newIsoPath -and (Test-Path $newIsoPath)) {
+                    $script:effectiveIsoPath = $newIsoPath
+                    Write-Host "ISO path updated to: $script:effectiveIsoPath" -ForegroundColor Green
+                }
+                elseif ($newIsoPath) {
+                    Write-Host "ISO file not found: $newIsoPath" -ForegroundColor Red
+                }
+                break
+            }
+            "3" {
+                $newDays = Read-Host "Enter rebuild interval in days (1-30) [$script:effectiveDaysBeforeRebuild]"
+                if ($newDays -and $newDays -match '^\d+$' -and [int]$newDays -ge 1 -and [int]$newDays -le 30) {
+                    $script:effectiveDaysBeforeRebuild = [int]$newDays
+                    Write-Host "Rebuild interval updated to: $script:effectiveDaysBeforeRebuild days" -ForegroundColor Green
+                }
+                elseif ($newDays) {
+                    Write-Host "Invalid input. Please enter a number between 1 and 30." -ForegroundColor Red
+                }
+                break
+            }
+            "R" {
+                Reset-ToDefaults
+                Write-Host "Settings reset to defaults" -ForegroundColor Green
+                break
+            }
+            "B" {
+                return
+            }
+            default {
+                Write-Host "Invalid selection. Please choose 1-3, R, or B." -ForegroundColor Red
+            }
+        }
+        
+        if ($choice.ToUpper() -ne "B") {
+            Start-Sleep -Seconds 1
+        }
+    } while ($choice.ToUpper() -ne "B")
+}
+
+function Show-SystemInformation {
+    <#
+    .SYNOPSIS
+        Displays system information and environment status
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Clear-Host
+    Write-Host "=" * 70 -ForegroundColor Magenta
+    Write-Host "   System Information" -ForegroundColor Magenta
+    Write-Host "=" * 70 -ForegroundColor Magenta
+    Write-Host ""
     
     try {
-        Write-Information "Creating unattended installation ISO..." -InformationAction Continue
+        # System basics
+        $os = Get-CimInstance Win32_OperatingSystem
+        $computer = Get-CimInstance Win32_ComputerSystem
         
-        # Create working directory
-        $null = New-Item -ItemType Directory -Path $workingDir -Force
+        Write-Host "System Information:" -ForegroundColor Yellow
+        Write-Host "  Computer: $($computer.Name)" -ForegroundColor White
+        Write-Host "  OS: $($os.Caption)" -ForegroundColor White
+        Write-Host "  Version: $($os.Version)" -ForegroundColor White
+        Write-Host "  Memory: $([math]::Round($computer.TotalPhysicalMemory / 1GB, 1)) GB" -ForegroundColor White
+        Write-Host ""
         
-        # Copy autounattend.xml to root of working directory
-        Copy-Item $AutounattendPath (Join-Path $workingDir "autounattend.xml") -Force
-        Write-Information "Added autounattend.xml to ISO" -InformationAction Continue
-        
-        # Copy PowerShell scripts if they exist
-        if ($ScriptsPath -and (Test-Path $ScriptsPath)) {
-            $scriptsDestination = Join-Path $workingDir "scripts"
-            $null = New-Item -ItemType Directory -Path $scriptsDestination -Force
-            Copy-Item "$ScriptsPath\*" $scriptsDestination -Recurse -Force
-            Write-Information "Added scripts directory to ISO" -InformationAction Continue
-        }
-        
-        # Create a simple ISO without boot requirements (it's just a data disc)
-        $oscdimgArgs = @(
-            '-n', # No optimization
-            '-o', # Optimize storage by encoding duplicate files only once
-            '-m', # Ignore maximum size limit
-            "-l`"UNATTEND`"", # Volume label
-            $workingDir, # Source directory
-            $OutputIsoPath           # Output ISO path
+        # Check prerequisites
+        Write-Host "Tool Availability:" -ForegroundColor Yellow
+        $tools = @(
+            @{ Name = "Packer"; Command = "packer version" },
+            @{ Name = "Vagrant"; Command = "vagrant --version" },
+            @{ Name = "Hyper-V"; Test = { Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All | Where-Object State -eq 'Enabled' } }
         )
         
-        Write-Information "Building unattended ISO with oscdimg..." -InformationAction Continue
-        Write-Verbose "oscdimg command: $($script:Config.OscdimgPath) $($oscdimgArgs -join ' ')"
-        
-        & $script:Config.OscdimgPath @oscdimgArgs
-        
-        if ($LASTEXITCODE -ne 0) {
-            throw "oscdimg failed with exit code: $LASTEXITCODE"
-        }
-        
-        if (-not (Test-Path $OutputIsoPath)) {
-            throw "Output ISO was not created: $OutputIsoPath"
-        }
-        
-        # Verify the ISO was created properly
-        try {
-            $verifyMount = Mount-DiskImage -ImagePath $OutputIsoPath -PassThru -ErrorAction Stop
-            $verifyDrive = ($verifyMount | Get-Volume).DriveLetter + ":"
-            $autounattendExists = Test-Path "$verifyDrive\autounattend.xml"
-            $null = Dismount-DiskImage -ImagePath $OutputIsoPath -ErrorAction Stop
-            
-            if (-not $autounattendExists) {
-                throw "autounattend.xml not found in created ISO"
+        foreach ($tool in $tools) {
+            try {
+                if ($tool.Command) {
+                    $version = Invoke-Expression $tool.Command 2>$null
+                    Write-Host "  ✓ $($tool.Name): $version" -ForegroundColor Green
+                }
+                elseif ($tool.Test) {
+                    $result = & $tool.Test
+                    if ($result) {
+                        Write-Host "  ✓ $($tool.Name): Enabled" -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host "  ✗ $($tool.Name): Not Available" -ForegroundColor Red
+                    }
+                }
             }
-            
-            Write-Information "Unattended ISO created and verified successfully: $OutputIsoPath" -InformationAction Continue
+            catch {
+                Write-Host "  ✗ $($tool.Name): Not Available" -ForegroundColor Red
+            }
+        }
+        
+        Write-Host ""
+        
+        # Check for virtual switches
+        Write-Host "Hyper-V Virtual Switches:" -ForegroundColor Yellow
+        try {
+            $switches = Get-VMSwitch -ErrorAction SilentlyContinue
+            if ($switches) {
+                foreach ($switch in $switches) {
+                    Write-Host "  • $($switch.Name) ($($switch.SwitchType))" -ForegroundColor White
+                }
+            }
+            else {
+                Write-Host "  No virtual switches found" -ForegroundColor Red
+            }
         }
         catch {
-            throw "Failed to verify created ISO: $($_.Exception.Message)"
-        }
-    }
-    finally {
-        if (Test-Path $workingDir) {
-            Remove-Item $workingDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
-function New-CustomIso {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [string]$SourceIsoPath,
-        
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [string]$OutputIsoPath,
-        
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [string]$UnattendXmlPath
-    )
-    
-    Write-Information "New-CustomIso called with parameters:" -InformationAction Continue
-    Write-Information "  SourceIsoPath: $SourceIsoPath" -InformationAction Continue
-    Write-Information "  OutputIsoPath: $OutputIsoPath" -InformationAction Continue
-    Write-Information "  UnattendXmlPath: $UnattendXmlPath" -InformationAction Continue
-    
-    # Validate parameters
-    if ([string]::IsNullOrWhiteSpace($SourceIsoPath)) {
-        throw "SourceIsoPath parameter is null or empty"
-    }
-    if ([string]::IsNullOrWhiteSpace($OutputIsoPath)) {
-        throw "OutputIsoPath parameter is null or empty"
-    }
-    if ([string]::IsNullOrWhiteSpace($UnattendXmlPath)) {
-        throw "UnattendXmlPath parameter is null or empty"
-    }
-    
-    # Convert to absolute paths
-    $absoluteSourceIsoPath = if ([System.IO.Path]::IsPathRooted($SourceIsoPath)) { 
-        $SourceIsoPath 
-    }
-    else { 
-        Join-Path $PWD $SourceIsoPath
-    }
-    
-    $absoluteOutputIsoPath = if ([System.IO.Path]::IsPathRooted($OutputIsoPath)) { 
-        $OutputIsoPath 
-    }
-    else { 
-        Join-Path $PWD $OutputIsoPath
-    }
-    
-    $absoluteUnattendXmlPath = if ([System.IO.Path]::IsPathRooted($UnattendXmlPath)) { 
-        $UnattendXmlPath 
-    }
-    else { 
-        Join-Path $PWD $UnattendXmlPath
-    }
-    
-    Write-Information "Resolved absolute paths:" -InformationAction Continue
-    Write-Information "  Source ISO: $absoluteSourceIsoPath" -InformationAction Continue
-    Write-Information "  Output ISO: $absoluteOutputIsoPath" -InformationAction Continue
-    Write-Information "  Unattend XML: $absoluteUnattendXmlPath" -InformationAction Continue
-    
-    # Set up working directory
-    $tempBase = if ($script:Config.TempDirectory) { $script:Config.TempDirectory } else { $env:TEMP }
-    $workingDir = Join-Path $tempBase "winiso_$(Get-Random)"
-    Write-Information "Working directory: $workingDir" -InformationAction Continue
-    
-    try {
-        Write-Information "Creating custom Windows ISO with embedded autounattend.xml" -InformationAction Continue
-        
-        # Create working directory
-        New-Item -ItemType Directory -Path $workingDir -Force | Out-Null
-        Write-Information "Created working directory" -InformationAction Continue
-        
-        # Validate source files exist
-        if (-not (Test-Path $absoluteSourceIsoPath)) {
-            throw "Source ISO not found: $absoluteSourceIsoPath"
-        }
-        if (-not (Test-Path $absoluteUnattendXmlPath)) {
-            throw "Unattend XML not found: $absoluteUnattendXmlPath"
+            Write-Host "  Unable to query virtual switches" -ForegroundColor Red
         }
         
-        # Mount and copy source ISO
-        Write-Information "Mounting source ISO" -InformationAction Continue
-        $mount = Mount-DiskImage -ImagePath $absoluteSourceIsoPath -PassThru -ErrorAction Stop
-        $driveLetter = ($mount | Get-Volume).DriveLetter + ":"
-        $volumeLabel = (Get-Volume -DriveLetter $driveLetter.TrimEnd(':')).FileSystemLabel
+        Write-Host ""
         
-        if (-not $volumeLabel) { 
-            $volumeLabel = "CCSEVAL_X64FRE_EN-US_DV9" 
+        # Check existing Vagrant boxes
+        Write-Host "Vagrant Boxes:" -ForegroundColor Yellow
+        try {
+            $boxes = & vagrant box list 2>$null
+            if ($boxes) {
+                foreach ($box in $boxes) {
+                    Write-Host "  • $box" -ForegroundColor White
+                }
+            }
+            else {
+                Write-Host "  No Vagrant boxes found" -ForegroundColor Gray
+            }
         }
-        
-        Write-Information "Copying ISO contents from $driveLetter" -InformationAction Continue
-        Copy-Item "$driveLetter\*" $workingDir -Recurse -Force
-        Dismount-DiskImage -ImagePath $absoluteSourceIsoPath | Out-Null
-        Write-Information "ISO contents copied successfully" -InformationAction Continue
-
-        # Add autounattend.xml to the ROOT of the ISO
-        $autounattendDestination = Join-Path $workingDir "autounattend.xml"
-        Write-Information "Copying autounattend.xml to ISO root" -InformationAction Continue
-        Copy-Item $absoluteUnattendXmlPath $autounattendDestination -Force
-        
-        # Verify it was copied
-        if (Test-Path $autounattendDestination) {
-            Write-Information "Successfully added autounattend.xml to ISO root" -InformationAction Continue
+        catch {
+            Write-Host "  Unable to query Vagrant boxes" -ForegroundColor Red
         }
-        else {
-            throw "Failed to copy autounattend.xml to ISO root"
-        }
-
-        # Try to copy scripts directory
-        $scriptsSource = $null
-        if ($PSScriptRoot) {
-            $projectRoot = Split-Path $PSScriptRoot -Parent
-            $scriptsSource = Join-Path $projectRoot "packer\scripts"
-        }
-        
-        if (-not $scriptsSource -or -not (Test-Path $scriptsSource)) {
-            $scriptsSource = Join-Path $PWD "packer\scripts"
-        }
-        
-        if (Test-Path $scriptsSource) {
-            $scriptsDestination = Join-Path $workingDir "scripts"
-            New-Item -ItemType Directory -Path $scriptsDestination -Force | Out-Null
-            Copy-Item "$scriptsSource\*" $scriptsDestination -Recurse -Force
-            Write-Information "Added scripts directory to ISO" -InformationAction Continue
-        }
-        else {
-            Write-Information "No scripts directory found, skipping" -InformationAction Continue
-        }
-
-        # Create bootable ISO
-        Write-Information "Building bootable ISO with oscdimg" -InformationAction Continue
-        $etfsboot = Join-Path $workingDir 'boot\etfsboot.com'
-        $efiSys = Join-Path $workingDir 'efi\microsoft\boot\efisys.bin'
-        
-        # Validate oscdimg
-        if (-not $script:Config.OscdimgPath -or -not (Test-Path $script:Config.OscdimgPath)) {
-            throw "oscdimg.exe not found or not configured"
-        }
-        
-        $oscdimgArgs = @('-m', '-o', '-u2', '-udfver102', "-l$volumeLabel")
-        
-        # Configure boot options
-        if ((Test-Path $etfsboot) -and (Test-Path $efiSys)) {
-            Write-Information "Using dual boot (BIOS + UEFI)" -InformationAction Continue
-            $bootdata = "2#p0,e,b$etfsboot#pEF,e,b$efiSys"
-            $oscdimgArgs += "-bootdata:$bootdata"
-        }
-        elseif (Test-Path $etfsboot) {
-            Write-Information "Using BIOS boot only" -InformationAction Continue
-            $oscdimgArgs += "-b$etfsboot"
-        }
-        elseif (Test-Path $efiSys) {
-            Write-Information "Using UEFI boot only" -InformationAction Continue
-            $oscdimgArgs += @('-efi', $efiSys)
-        }
-        else {
-            throw "No boot files found in ISO"
-        }
-        
-        $oscdimgArgs += @($workingDir, $absoluteOutputIsoPath)
-        
-        Write-Information "Running oscdimg" -InformationAction Continue
-        & $script:Config.OscdimgPath @oscdimgArgs
-        
-        if ($LASTEXITCODE -ne 0) {
-            throw "oscdimg failed with exit code: $LASTEXITCODE"
-        }
-        
-        if (-not (Test-Path $absoluteOutputIsoPath)) {
-            throw "Output ISO was not created: $absoluteOutputIsoPath"
-        }
-        
-        # Verify the custom ISO
-        Write-Information "Verifying custom ISO contents" -InformationAction Continue
-        $verifyMount = Mount-DiskImage -ImagePath $absoluteOutputIsoPath -PassThru
-        $verifyDrive = ($verifyMount | Get-Volume).DriveLetter + ":"
-        $autounattendExists = Test-Path "$verifyDrive\autounattend.xml"
-        
-        if ($autounattendExists) {
-            Write-Information "Verified autounattend.xml in custom ISO root" -InformationAction Continue
-        }
-        else {
-            Write-Warning "autounattend.xml NOT found in custom ISO root"
-        }
-        
-        # List contents for debugging
-        $contents = Get-ChildItem $verifyDrive
-        Write-Information "Custom ISO root contents: $($contents.Name -join ', ')" -InformationAction Continue
-        
-        Dismount-DiskImage -ImagePath $absoluteOutputIsoPath | Out-Null
-        
-        if (-not $autounattendExists) {
-            throw "autounattend.xml not found in custom ISO root after verification"
-        }
-        
-        $isoSize = (Get-Item $absoluteOutputIsoPath).Length / 1GB
-        $isoSizeGB = [math]::Round($isoSize, 2)
-        Write-Information "Custom bootable ISO created successfully: $absoluteOutputIsoPath (Size: $isoSizeGB GB)" -InformationAction Continue
         
     }
-    finally {
-        if (Test-Path $workingDir) {
-            Write-Information "Cleaning up working directory: $workingDir" -InformationAction Continue
-            Remove-Item $workingDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
+    catch {
+        Write-Host "Error retrieving system information: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 #endregion
 
-#region Box Management Functions
-function Test-BoxAge {
+#region Build Functions
+function Get-CurrentBoxInfo {
+    <#
+    .SYNOPSIS
+        Gets information about the current golden image box
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$BoxName,
-        
-        [Parameter(Mandatory)]
-        [int]$MaxAgeDays
+        [string]$BoxName
     )
     
     try {
         $boxInfo = & vagrant box list 2>$null | Where-Object { $_ -like "*$BoxName*" }
+        
         if (-not $boxInfo) {
-            Write-Information "Box '$BoxName' not found - rebuild needed" -InformationAction Continue
-            return $true
+            return @{
+                Exists       = $false
+                AgeDays      = $null
+                NeedsRebuild = $true
+            }
         }
         
         # Check box directory timestamp
@@ -769,117 +386,175 @@ function Test-BoxAge {
         
         if ($boxDirs) {
             $latestBox = $boxDirs | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            $ageInDays = ((Get-Date) - $latestBox.LastWriteTime).Days
+            $ageDays = [math]::Floor(((Get-Date) - $latestBox.LastWriteTime).TotalDays)
+            $needsRebuild = $ageDays -ge $script:effectiveDaysBeforeRebuild
             
-            Write-Information "Box age: $ageInDays days (threshold: $MaxAgeDays days)" -InformationAction Continue
-            
-            return $ageInDays -ge $MaxAgeDays
+            return @{
+                Exists       = $true
+                AgeDays      = $ageDays
+                NeedsRebuild = $needsRebuild
+                LastModified = $latestBox.LastWriteTime
+            }
         }
         
-        return $true
+        return @{
+            Exists       = $true
+            AgeDays      = $null
+            NeedsRebuild = $true
+        }
     }
     catch {
-        Write-Warning "Could not determine box age: $($_.Exception.Message)"
-        return $true
+        Write-Warning "Could not determine box information: $($_.Exception.Message)"
+        return @{
+            Exists       = $false
+            AgeDays      = $null
+            NeedsRebuild = $true
+        }
     }
 }
 
-function Get-RunningVagrantVMs {
+function Reset-ToDefaults {
+    <#
+    .SYNOPSIS
+        Resets parameters to configuration defaults
+    #>
+    [CmdletBinding()]
+    param()
+    
+    $config = Get-WorkflowConfig
+    $script:effectiveBoxName = $config.golden_image.box_name
+    $script:effectiveDaysBeforeRebuild = $config.golden_image.rebuild_interval_days
+    
+    # Try to find ISO
+    $foundIso = Find-WindowsServerIso
+    if ($foundIso) {
+        $script:effectiveIsoPath = $foundIso
+    }
+}
+
+function New-CustomIso {
+    <#
+    .SYNOPSIS
+        Creates a custom Windows ISO with embedded autounattend.xml
+    #>
     [CmdletBinding()]
     param(
-        [Parameter()]
-        [string]$VagrantBaseDir
+        [Parameter(Mandatory)]
+        [string]$SourceIsoPath,
+        
+        [Parameter(Mandatory)]
+        [string]$OutputIsoPath,
+        
+        [Parameter(Mandatory)]
+        [string]$UnattendXmlPath
     )
     
-    if (-not $VagrantBaseDir) {
-        $projectRoot = Split-Path $PSScriptRoot -Parent
-        $VagrantBaseDir = Join-Path $projectRoot "vagrant"
-    }
-    
-    # Ensure absolute path
-    $absoluteVagrantBaseDir = if ([System.IO.Path]::IsPathRooted($VagrantBaseDir)) { 
-        $VagrantBaseDir 
-    }
-    else { 
-        Join-Path $PWD $VagrantBaseDir 
-    }
-    
-    Write-Information "Checking for running VMs in: $absoluteVagrantBaseDir" -InformationAction Continue
-    
-    $environments = @("barebones", "fileserver", "dev-box", "domain-controller", "iis-server")
-    $runningVMs = @()
-    $originalLocation = Get-Location
+    $config = Get-WorkflowConfig
+    $tempBase = $config.global.temp_directory
+    $workingDir = Join-Path $tempBase "winiso_$(Get-Random)"
     
     try {
-        foreach ($env in $environments) {
-            $envPath = Join-Path $absoluteVagrantBaseDir $env
-            Write-Information "Checking environment: $envPath" -InformationAction Continue
-            
-            if (Test-Path $envPath) {
-                try {
-                    Set-Location $envPath
-                    Write-Information "Changed to: $(Get-Location)" -InformationAction Continue
-                    
-                    $status = & vagrant status 2>$null
-                    Write-Information "Vagrant status for ${env}: $($status -join '; ')" -InformationAction Continue
-                    
-                    if ($status -and ($status -match "running")) {
-                        $runningVMs += $env
-                        Write-Information "Found running VM: $env" -InformationAction Continue
-                    }
-                }
-                catch {
-                    Write-Warning "Could not check status for environment: $env - $($_.Exception.Message)"
-                }
-            }
-            else {
-                Write-Information "Environment directory not found: $envPath" -InformationAction Continue
+        Write-WorkflowProgress -Activity "Creating Custom ISO" -Status "Setting up working directory..." -PercentComplete 10
+        
+        New-Item -ItemType Directory -Path $workingDir -Force | Out-Null
+        
+        # Validate source files
+        @($SourceIsoPath, $UnattendXmlPath) | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                throw "Required file not found: $_"
             }
         }
+        
+        # Mount and copy source ISO
+        Write-WorkflowProgress -Activity "Creating Custom ISO" -Status "Mounting source ISO..." -PercentComplete 20
+        $mount = Mount-DiskImage -ImagePath $SourceIsoPath -PassThru -ErrorAction Stop
+        $driveLetter = ($mount | Get-Volume).DriveLetter + ":"
+        $volumeLabel = (Get-Volume -DriveLetter $driveLetter.TrimEnd(':')).FileSystemLabel
+        
+        if (-not $volumeLabel) { 
+            $volumeLabel = "CCSEVAL_X64FRE_EN-US_DV9" 
+        }
+        
+        Write-WorkflowProgress -Activity "Creating Custom ISO" -Status "Copying ISO contents..." -PercentComplete 40
+        Copy-Item "$driveLetter\*" $workingDir -Recurse -Force
+        Dismount-DiskImage -ImagePath $SourceIsoPath | Out-Null
+        
+        # Add autounattend.xml to the ROOT of the ISO
+        Write-WorkflowProgress -Activity "Creating Custom ISO" -Status "Adding autounattend.xml..." -PercentComplete 60
+        $autounattendDestination = Join-Path $workingDir "autounattend.xml"
+        Copy-Item $UnattendXmlPath $autounattendDestination -Force
+        
+        # Try to copy scripts directory
+        $scriptsSource = Join-Path (Split-Path $PSScriptRoot -Parent) "packer\scripts"
+        if (Test-Path $scriptsSource) {
+            $scriptsDestination = Join-Path $workingDir "scripts"
+            New-Item -ItemType Directory -Path $scriptsDestination -Force | Out-Null
+            Copy-Item "$scriptsSource\*" $scriptsDestination -Recurse -Force
+        }
+        
+        # Create bootable ISO
+        Write-WorkflowProgress -Activity "Creating Custom ISO" -Status "Building bootable ISO..." -PercentComplete 80
+        $oscdimgPath = Find-OscdimgPath
+        if (-not $oscdimgPath) {
+            throw "oscdimg.exe not found. Please install Windows ADK."
+        }
+        
+        $etfsboot = Join-Path $workingDir 'boot\etfsboot.com'
+        $efiSys = Join-Path $workingDir 'efi\microsoft\boot\efisys.bin'
+        
+        $oscdimgArgs = @('-m', '-o', '-u2', '-udfver102', "-l$volumeLabel")
+        
+        # Configure boot options
+        if ((Test-Path $etfsboot) -and (Test-Path $efiSys)) {
+            $bootdata = "2#p0,e,b$etfsboot#pEF,e,b$efiSys"
+            $oscdimgArgs += "-bootdata:$bootdata"
+        }
+        elseif (Test-Path $etfsboot) {
+            $oscdimgArgs += "-b$etfsboot"
+        }
+        elseif (Test-Path $efiSys) {
+            $oscdimgArgs += @('-efi', $efiSys)
+        }
+        else {
+            throw "No boot files found in ISO"
+        }
+        
+        $oscdimgArgs += @($workingDir, $OutputIsoPath)
+        
+        & $oscdimgPath @oscdimgArgs
+        
+        if ($LASTEXITCODE -ne 0) {
+            throw "oscdimg failed with exit code: $LASTEXITCODE"
+        }
+        
+        Write-WorkflowProgress -Activity "Creating Custom ISO" -Status "Verifying custom ISO..." -PercentComplete 95
+        
+        # Verify the custom ISO
+        $verifyMount = Mount-DiskImage -ImagePath $OutputIsoPath -PassThru
+        $verifyDrive = ($verifyMount | Get-Volume).DriveLetter + ":"
+        $autounattendExists = Test-Path "$verifyDrive\autounattend.xml"
+        Dismount-DiskImage -ImagePath $OutputIsoPath | Out-Null
+        
+        if (-not $autounattendExists) {
+            throw "autounattend.xml not found in custom ISO root after verification"
+        }
+        
+        Write-WorkflowProgress -Activity "Creating Custom ISO" -Status "Complete" -PercentComplete 100
+        Write-Information "Custom bootable ISO created successfully: $OutputIsoPath" -InformationAction Continue
+        
     }
     finally {
-        Set-Location $originalLocation
-    }
-    
-    Write-Information "Running VMs found: $($runningVMs -join ', ')" -InformationAction Continue
-    return $runningVMs
-}
-#endregion
-
-#region Scheduled Task Functions
-function New-WeeklyScheduledTask {
-    [CmdletBinding()]
-    param([string]$ScriptPath)
-    
-    $taskName = "Build-WeeklyGoldenImage"
-    $taskDescription = "Weekly Windows Server 2022 Golden Image Build"
-    
-    try {
-        # Remove existing task
-        $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($existingTask) {
-            $null = Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+        if (Test-Path $workingDir) {
+            Remove-Item $workingDir -Recurse -Force -ErrorAction SilentlyContinue
         }
-        
-        # Create new task
-        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-ExecutionPolicy Bypass -File `"$ScriptPath`""
-        $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 2:00AM
-        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes $script:Config.BuildTimeoutMinutes) -RestartCount $script:Config.RetryAttempts
-        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
-        
-        $null = Register-ScheduledTask -TaskName $taskName -Description $taskDescription -Action $action -Trigger $trigger -Settings $settings -Principal $principal
-        
-        Write-Information "Scheduled task '$taskName' created successfully" -InformationAction Continue
-        Write-Host "Task will run every Sunday at 2:00 AM" -ForegroundColor Green
-    }
-    catch {
-        throw "Failed to create scheduled task: $($_.Exception.Message)"
     }
 }
-#endregion
 
-#region Packer Functions
 function Invoke-PackerBuild {
+    <#
+    .SYNOPSIS
+        Executes Packer build with enhanced error handling
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -893,99 +568,64 @@ function Invoke-PackerBuild {
     )
     
     $originalLocation = Get-Location
-
+    $config = Get-WorkflowConfig
+    
     try {
-        # Ensure all paths are absolute
-        $absoluteCustomIsoPath = if ([System.IO.Path]::IsPathRooted($CustomIsoPath)) { 
-            $CustomIsoPath 
-        }
-        else { 
-            Join-Path $PWD $CustomIsoPath 
-        }
-        
-        $absolutePackerConfigPath = if ([System.IO.Path]::IsPathRooted($PackerConfigPath)) { 
-            $PackerConfigPath 
-        }
-        else { 
-            Join-Path $PWD $PackerConfigPath 
-        }
-        
-        $absolutePackerWorkingDir = if ([System.IO.Path]::IsPathRooted($PackerWorkingDir)) { 
-            $PackerWorkingDir 
-        }
-        else { 
-            Join-Path $PWD $PackerWorkingDir 
-        }
-        
-        Write-Information "Absolute custom ISO path: $absoluteCustomIsoPath" -InformationAction Continue
-        Write-Information "Absolute packer config path: $absolutePackerConfigPath" -InformationAction Continue
-        Write-Information "Absolute packer working dir: $absolutePackerWorkingDir" -InformationAction Continue
-        
         # Change to packer directory
-        Set-Location $absolutePackerWorkingDir
-        Write-Information "Changed to packer directory: $(Get-Location)" -InformationAction Continue
-
+        Set-Location $PackerWorkingDir
+        
         # Clean previous build artifacts
-        $outputDir = Join-Path $absolutePackerWorkingDir "output-hyperv-iso"
+        $outputDir = Join-Path $PackerWorkingDir "output-hyperv-iso"
         if (Test-Path $outputDir) {
-            Write-Information "Cleaning previous build artifacts: $outputDir" -InformationAction Continue
+            Write-WorkflowProgress -Activity "Packer Build" -Status "Cleaning previous artifacts..." -PercentComplete 5
             Remove-Item $outputDir -Recurse -Force
         }
         
         # Remove any lingering VHDX files
-        Get-ChildItem -Path $absolutePackerWorkingDir -Filter "*.vhdx" -Recurse -ErrorAction SilentlyContinue | 
+        Get-ChildItem -Path $PackerWorkingDir -Filter "*.vhdx" -Recurse -ErrorAction SilentlyContinue | 
         ForEach-Object {
-            Write-Information "Removing old VHDX: $($_.FullName)" -InformationAction Continue
             Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
         }
-
-        # Validate that the custom ISO exists
-        if (-not (Test-Path $absoluteCustomIsoPath)) {
-            throw "Custom ISO not found: $absoluteCustomIsoPath"
+        
+        # Validate inputs
+        @($CustomIsoPath, $PackerConfigPath) | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                throw "Required file not found: $_"
+            }
         }
         
-        if (-not (Test-Path $absolutePackerConfigPath)) {
-            throw "Packer config not found: $absolutePackerConfigPath"
-        }
-
         $buildStartTime = Get-Date
-        Write-Information "Starting Packer build (estimated time: 30-60 minutes)..." -InformationAction Continue
-        Write-Information "Custom ISO: $absoluteCustomIsoPath" -InformationAction Continue
-        Write-Information "Packer config: $absolutePackerConfigPath" -InformationAction Continue
-
-        # Build with absolute path to the custom ISO
-        $configFileName = Split-Path $absolutePackerConfigPath -Leaf
+        Write-WorkflowProgress -Activity "Packer Build" -Status "Starting build (estimated 30-60 minutes)..." -PercentComplete 10
+        
+        # Build with custom ISO
+        $configFileName = Split-Path $PackerConfigPath -Leaf
         $packerArgs = @(
             'build', 
-            '-var', "iso_url=$absoluteCustomIsoPath",
+            '-var', "iso_url=$CustomIsoPath",
             $configFileName
         )
         
-        Write-Information "Packer command: packer $($packerArgs -join ' ')" -InformationAction Continue
-        Write-Information "Working directory: $(Get-Location)" -InformationAction Continue
-        
-        # Execute packer with detailed output
+        # Execute packer with logging
         $env:PACKER_LOG = "1"
-        $packerLogPath = Join-Path $absolutePackerWorkingDir "packer-build.log"
+        $packerLogPath = Join-Path $PackerWorkingDir "packer-build.log"
         $env:PACKER_LOG_PATH = $packerLogPath
         
+        Write-Information "Executing: packer $($packerArgs -join ' ')" -InformationAction Continue
+        
         & packer @packerArgs
-
+        
         if ($LASTEXITCODE -ne 0) {
-            # Try to get more details from the log
+            $errorDetails = ""
             if (Test-Path $packerLogPath) {
-                Write-Information "Packer log file contents:" -InformationAction Continue
-                Get-Content $packerLogPath | Select-Object -Last 50 | ForEach-Object {
-                    Write-Information "LOG: $_" -InformationAction Continue
-                }
+                $errorDetails = Get-Content $packerLogPath | Select-Object -Last 20 | Out-String
             }
-            throw "Packer build failed with exit code: $LASTEXITCODE"
+            throw "Packer build failed with exit code: $LASTEXITCODE`n$errorDetails"
         }
-
+        
         $buildDuration = (Get-Date) - $buildStartTime
         Write-Information "Packer build completed in $($buildDuration.ToString('hh\:mm\:ss'))" -InformationAction Continue
-
-        # Verify output was created
+        
+        # Verify output
         if (-not (Test-Path $outputDir)) {
             throw "Packer output directory not found: $outputDir"
         }
@@ -995,246 +635,500 @@ function Invoke-PackerBuild {
             throw "No VHDX files found in Packer output directory"
         }
         
-        Write-Information "Build successful! Found $($vhdxFiles.Count) VHDX file(s)" -InformationAction Continue
-
         return $buildDuration
     }
     finally {
         Set-Location $originalLocation
-        # Clean up environment variables
         $env:PACKER_LOG = $null
         $env:PACKER_LOG_PATH = $null
     }
 }
-#endregion
 
-#region Main Functions
+function New-VagrantBoxFromPacker {
+    <#
+    .SYNOPSIS
+        Creates a Vagrant box from Packer output
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$BoxName,
+        
+        [Parameter(Mandatory)]
+        [string]$PackerOutputDirectory,
+        
+        [Parameter(Mandatory)]
+        [string]$VagrantBoxDirectory
+    )
+    
+    Write-WorkflowProgress -Activity "Creating Vagrant Box" -Status "Preparing box packaging..." -PercentComplete 10
+    
+    # Find VHDX file
+    $vhdxPath = Join-Path $PackerOutputDirectory "Virtual Hard Disks\*.vhdx"
+    $vhdxFile = Get-ChildItem $vhdxPath -ErrorAction SilentlyContinue | Select-Object -First 1
+    
+    if (-not $vhdxFile) {
+        throw "No VHDX file found in $PackerOutputDirectory"
+    }
+    
+    # Create boxes directory
+    if (-not (Test-Path $VagrantBoxDirectory)) {
+        New-Item -ItemType Directory -Path $VagrantBoxDirectory -Force | Out-Null
+    }
+    
+    # Create temporary directory for box packaging
+    $config = Get-WorkflowConfig
+    $tempBase = $config.global.temp_directory
+    $tempDirectory = Join-Path $tempBase "vagrant-box-$BoxName-$(Get-Random)"
+    
+    try {
+        New-Item -ItemType Directory -Path $tempDirectory -Force | Out-Null
+        
+        Write-WorkflowProgress -Activity "Creating Vagrant Box" -Status "Copying VHDX file..." -PercentComplete 30
+        
+        # Copy VHDX with safe naming
+        $safeVMName = Get-SafeVMName -Name $BoxName
+        $boxVhdx = Join-Path $tempDirectory "${safeVMName}_os.vhdx"
+        Copy-Item $vhdxFile.FullName $boxVhdx
+        
+        Write-WorkflowProgress -Activity "Creating Vagrant Box" -Status "Creating box metadata..." -PercentComplete 50
+        
+        # Create Vagrantfile for Windows box
+        $boxVagrantfile = @"
+Vagrant.configure("2") do |config|
+  config.vm.guest = :windows
+  config.vm.communicator = "winrm"
+  config.winrm.username = "vagrant"
+  config.winrm.password = "vagrant"
+  config.winrm.transport = :plaintext
+  config.winrm.basic_auth_only = true
+  
+  config.vm.provider "hyperv" do |hv|
+    hv.enable_virtualization_extensions = false
+    hv.linked_clone = false
+    hv.enable_secure_boot = false
+  end
+end
+"@
+        
+        Set-Content -Path (Join-Path $tempDirectory "Vagrantfile") -Value $boxVagrantfile
+        
+        # Create metadata.json
+        $metadata = @{
+            provider  = "hyperv"
+            format    = "vhdx"
+            vm_name   = $safeVMName
+            vhdx_file = "${safeVMName}_os.vhdx"
+        } | ConvertTo-Json
+        
+        Set-Content -Path (Join-Path $tempDirectory "metadata.json") -Value $metadata
+        
+        Write-WorkflowProgress -Activity "Creating Vagrant Box" -Status "Packaging box file..." -PercentComplete 70
+        
+        # Package the box
+        $boxFile = Join-Path $VagrantBoxDirectory "$BoxName.box"
+        Set-Location $tempDirectory
+        
+        # Use tar if available, otherwise PowerShell compression
+        if (Get-Command tar -ErrorAction SilentlyContinue) {
+            & tar -czf $boxFile *
+        }
+        else {
+            Compress-Archive -Path "$tempDirectory\*" -DestinationPath "$boxFile.zip"
+            Move-Item "$boxFile.zip" $boxFile
+        }
+        
+        Write-WorkflowProgress -Activity "Creating Vagrant Box" -Status "Adding box to Vagrant..." -PercentComplete 90
+        
+        # Add box to Vagrant
+        & vagrant box add $BoxName $boxFile --force
+        
+        Write-WorkflowProgress -Activity "Creating Vagrant Box" -Status "Complete" -PercentComplete 100
+        Write-Information "Box '$BoxName' created and added to Vagrant successfully" -InformationAction Continue
+        
+    }
+    finally {
+        Set-Location $PSScriptRoot
+        if (Test-Path $tempDirectory) {
+            Remove-Item $tempDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Invoke-GoldenImageBuild {
+    <#
+    .SYNOPSIS
+        Main function to build the golden image
+    #>
     [CmdletBinding()]
     param()
     
     try {
-        Write-Host "=== Weekly Golden Image Build Process ===" -ForegroundColor Green
-        Write-Host "Building Windows Server 2022 golden image..." -ForegroundColor Yellow
-        Write-Host "Box Name: $BoxName"
-        Write-Host "ISO Path: $IsoPath"
-        Write-Host "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        Write-Host "`n" + ("=" * 70) -ForegroundColor Green
+        Write-Host "   Starting Golden Image Build Process" -ForegroundColor Green
+        Write-Host ("=" * 70) -ForegroundColor Green
+        Write-Host ""
+        
+        Write-Host "Configuration:" -ForegroundColor Yellow
+        Write-Host "  Box Name: $script:effectiveBoxName" -ForegroundColor White
+        Write-Host "  ISO Path: $script:effectiveIsoPath" -ForegroundColor White
+        Write-Host "  Force Rebuild: $Force" -ForegroundColor White
+        Write-Host "  Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor White
+        Write-Host ""
         
         $buildStartTime = Get-Date
         
-        # Get absolute paths for all project directories
-        $projectRoot = Split-Path $PSScriptRoot -Parent
-        $packerDir = Join-Path $projectRoot "packer"
-        $scriptsDir = Join-Path $projectRoot "scripts"
-        $vagrantDir = Join-Path $projectRoot "vagrant"
-        $boxesDir = Join-Path $projectRoot "boxes"
-        
-        Write-Information "Project root: $projectRoot" -InformationAction Continue
-        Write-Information "Packer directory: $packerDir" -InformationAction Continue
-        
-        # Test prerequisites
+        # Validate environment
+        Write-WorkflowProgress -Activity "Golden Image Build" -Status "Validating environment..." -PercentComplete 5
         Test-Prerequisites
+        Test-HyperVEnvironment
         
-        # Validate main Windows ISO (ensure absolute path)
-        $absoluteIsoPath = if ([System.IO.Path]::IsPathRooted($IsoPath)) { 
-            $IsoPath 
-        }
-        else { 
-            Join-Path $PWD $IsoPath 
-        }
-        Write-Information "Using absolute ISO path: $absoluteIsoPath" -InformationAction Continue
-        Test-IsoFile -Path $absoluteIsoPath
+        # Validate ISO
+        Write-WorkflowProgress -Activity "Golden Image Build" -Status "Validating ISO file..." -PercentComplete 10
+        Test-IsoFile -Path $script:effectiveIsoPath
         
         # Check if rebuild is needed
         if (-not $Force) {
-            $needsRebuild = Test-BoxAge -BoxName $BoxName -MaxAgeDays $DaysBeforeRebuild
-            if (-not $needsRebuild) {
-                Write-Host "Golden image is still fresh. Use -Force to rebuild anyway." -ForegroundColor Green
+            Write-WorkflowProgress -Activity "Golden Image Build" -Status "Checking if rebuild is needed..." -PercentComplete 15
+            $boxInfo = Get-CurrentBoxInfo -BoxName $script:effectiveBoxName
+            
+            if ($boxInfo.Exists -and -not $boxInfo.NeedsRebuild) {
+                Write-Host "`nGolden image is still fresh (age: $($boxInfo.AgeDays) days)." -ForegroundColor Green
+                Write-Host "Use -Force to rebuild anyway." -ForegroundColor Yellow
                 return
             }
         }
         
-        # Prepare absolute paths for all files
-        $unattendIsoPath = Join-Path $packerDir "winserver_2022_unattend.iso"
-        $unattendXmlPath = Join-Path $packerDir "autounattend.xml"
-        $packerConfigPath = Join-Path $packerDir "windows-server-2022.pkr.hcl"
-        $customIsoPath = Join-Path $packerDir "custom_windows_server_2022.iso"
+        # Get project paths
+        $config = Get-WorkflowConfig
+        $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+        $packerDir = Join-Path $projectRoot "packer"
+        $boxesDir = Join-Path $projectRoot $config.global.boxes_directory
         
-        Write-Information "Unattend XML path: $unattendXmlPath" -InformationAction Continue
-        Write-Information "Packer config path: $packerConfigPath" -InformationAction Continue
-        Write-Information "Custom ISO path: $customIsoPath" -InformationAction Continue
+        # Ensure directories exist
+        @($boxesDir) | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                $null = New-Item -ItemType Directory -Path $_ -Force
+            }
+        }
+        
+        # Prepare file paths
+        $unattendXmlPath = Join-Path $packerDir "autounattend.xml"
+        $packerConfigPath = Join-Path $packerDir "windows-server-2025.pkr.hcl"
+        $customIsoPath = Join-Path $packerDir "custom_windows_server_2025.iso"
         
         # Validate required files exist
-        if (-not (Test-Path $unattendXmlPath)) {
-            throw "Unattend XML file not found: $unattendXmlPath"
-        }
-        if (-not (Test-Path $packerConfigPath)) {
-            throw "Packer configuration file not found: $packerConfigPath"
-        }
-        
-        # Create boxes directory if it doesn't exist
-        if (-not (Test-Path $boxesDir)) {
-            Write-Information "Creating boxes directory: $boxesDir" -InformationAction Continue
-            $null = New-Item -ItemType Directory -Path $boxesDir -Force
+        @($unattendXmlPath, $packerConfigPath) | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                throw "Required file not found: $_"
+            }
         }
         
         # Remove existing custom ISO
         if (Test-Path $customIsoPath) {
-            Write-Information "Removing existing custom ISO: $customIsoPath" -InformationAction Continue
+            Write-WorkflowProgress -Activity "Golden Image Build" -Status "Cleaning previous build artifacts..." -PercentComplete 20
             Remove-Item $customIsoPath -Force
         }
-
-        # DEBUG
-        Write-Host "`n=== DEBUG: Before New-CustomIso Call ===" -ForegroundColor Magenta
-
-        # Check all the paths we're about to pass
-        Write-Host "Variables before New-CustomIso call:" -ForegroundColor Yellow
-        Write-Host "  absoluteIsoPath: '$absoluteIsoPath'" -ForegroundColor Gray
-        Write-Host "  customIsoPath: '$customIsoPath'" -ForegroundColor Gray  
-        Write-Host "  unattendXmlPath: '$unattendXmlPath'" -ForegroundColor Gray
-        Write-Host "  PSScriptRoot: '$PSScriptRoot'" -ForegroundColor Gray
-        Write-Host "  projectRoot: '$projectRoot'" -ForegroundColor Gray
-        Write-Host "  packerDir: '$packerDir'" -ForegroundColor Gray
-
-        # Test each path
-        Write-Host "`nPath validation:" -ForegroundColor Yellow
-        Write-Host "  absoluteIsoPath exists: $(Test-Path $absoluteIsoPath -ErrorAction SilentlyContinue)" -ForegroundColor Gray
-        Write-Host "  customIsoPath parent dir exists: $(Test-Path (Split-Path $customIsoPath -Parent) -ErrorAction SilentlyContinue)" -ForegroundColor Gray
-        Write-Host "  unattendXmlPath exists: $(Test-Path $unattendXmlPath -ErrorAction SilentlyContinue)" -ForegroundColor Gray
-
-        # Check for null values
-        Write-Host "`nNull checks:" -ForegroundColor Yellow
-        Write-Host "  absoluteIsoPath is null: $([string]::IsNullOrWhiteSpace($absoluteIsoPath))" -ForegroundColor Gray
-        Write-Host "  customIsoPath is null: $([string]::IsNullOrWhiteSpace($customIsoPath))" -ForegroundColor Gray
-        Write-Host "  unattendXmlPath is null: $([string]::IsNullOrWhiteSpace($unattendXmlPath))" -ForegroundColor Gray
-
-        Write-Host "=== END DEBUG ===" -ForegroundColor Magenta
         
-        # Create custom ISO with autounattend.xml embedded
-        Write-Information "Creating custom Windows ISO with embedded autounattend.xml..." -InformationAction Continue
-        New-CustomIso -SourceIsoPath $absoluteIsoPath -OutputIsoPath $customIsoPath -UnattendXmlPath $unattendXmlPath
+        # Create custom ISO with autounattend.xml
+        Write-WorkflowProgress -Activity "Golden Image Build" -Status "Creating custom Windows ISO..." -PercentComplete 25
+        New-CustomIso -SourceIsoPath $script:effectiveIsoPath -OutputIsoPath $customIsoPath -UnattendXmlPath $unattendXmlPath
         
-        # Execute Packer build with absolute paths
-        Write-Information "Starting Packer build..." -InformationAction Continue
-        $null = Invoke-PackerBuild -CustomIsoPath $customIsoPath -PackerConfigPath $packerConfigPath -PackerWorkingDir $packerDir
+        # Execute Packer build
+        Write-WorkflowProgress -Activity "Golden Image Build" -Status "Starting Packer build (this may take 30-60 minutes)..." -PercentComplete 30
+        $buildDuration = Invoke-PackerBuild -CustomIsoPath $customIsoPath -PackerConfigPath $packerConfigPath -PackerWorkingDir $packerDir
         
         # Package as Vagrant box
-        Write-Information "Packaging as Vagrant box..." -InformationAction Continue
-        $boxScriptPath = Join-Path $scriptsDir "New-VagrantBox.ps1"
+        Write-WorkflowProgress -Activity "Golden Image Build" -Status "Packaging as Vagrant box..." -PercentComplete 85
         $packerOutputDir = Join-Path $packerDir "output-hyperv-iso"
         
         if ($Force) {
             try {
-                & vagrant box remove $BoxName --provider hyperv --force 2>$null
-                Write-Information "Removed existing box: $BoxName" -InformationAction Continue
+                & vagrant box remove $script:effectiveBoxName --provider hyperv --force 2>$null
+                Write-Information "Removed existing box: $script:effectiveBoxName" -InformationAction Continue
             }
             catch {
                 Write-Verbose "No existing box to remove"
             }
         }
         
-        if (Test-Path $boxScriptPath) {
-            $boxArgs = @{
-                BoxName               = $BoxName
-                PackerOutputDirectory = $packerOutputDir
-                VagrantBoxDirectory   = $boxesDir
-            }
-            
-            & $boxScriptPath @boxArgs
-        }
-        else {
-            Write-Warning "Box packaging script not found: $boxScriptPath"
-        }
+        New-VagrantBoxFromPacker -BoxName $script:effectiveBoxName -PackerOutputDirectory $packerOutputDir -VagrantBoxDirectory $boxesDir
         
-        # Clean up temporary files
-        Write-Information "Cleaning up temporary files..." -InformationAction Continue
+        # Cleanup
+        Write-WorkflowProgress -Activity "Golden Image Build" -Status "Cleaning up temporary files..." -PercentComplete 95
         if (Test-Path $customIsoPath) {
             Remove-Item $customIsoPath -Force -ErrorAction SilentlyContinue
         }
-        if (Test-Path $unattendIsoPath) {
-            Remove-Item $unattendIsoPath -Force -ErrorAction SilentlyContinue
-        }
         
         # Final summary
+        Write-Progress -Activity "Golden Image Build" -Completed
         $totalDuration = (Get-Date) - $buildStartTime
-        $nextBuildDate = (Get-Date).AddDays($DaysBeforeRebuild)
+        $nextBuildDate = (Get-Date).AddDays($script:effectiveDaysBeforeRebuild)
         
-        Write-Host "`n=== Golden Image Build Complete ===" -ForegroundColor Green
-        Write-Host "Total time: $($totalDuration.ToString('hh\:mm\:ss'))"
-        Write-Host "Box name: $BoxName"
-        Write-Host "Built on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-        Write-Host "Next build needed after: $($nextBuildDate.ToString('yyyy-MM-dd'))"
+        Write-Host "`n" + ("=" * 70) -ForegroundColor Green
+        Write-Host "   Golden Image Build Complete!" -ForegroundColor Green
+        Write-Host ("=" * 70) -ForegroundColor Green
+        Write-Host ""
+        Write-Host "Build Summary:" -ForegroundColor Yellow
+        Write-Host "  Total time: $($totalDuration.ToString('hh\:mm\:ss'))" -ForegroundColor White
+        Write-Host "  Box name: $script:effectiveBoxName" -ForegroundColor White
+        Write-Host "  Built on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor White
+        Write-Host "  Next build needed after: $($nextBuildDate.ToString('yyyy-MM-dd'))" -ForegroundColor White
+        Write-Host ""
         
-        # Display deployment instructions with absolute paths
-        Write-Host "`nYou can now deploy VMs using:" -ForegroundColor Yellow
-        $environments = @("barebones", "fileserver", "dev-box", "domain-controller", "iis-server")
-        foreach ($env in $environments) {
-            $envPath = Join-Path $vagrantDir $env
-            Write-Host "  Set-Location '$envPath'; vagrant up --provider=hyperv" -ForegroundColor White
-        }
+        # Show deployment options
+        Show-DeploymentInstructions
         
-        # Check for running VMs
+    }
+    catch {
+        Write-Progress -Activity "Golden Image Build" -Completed
+        Write-Host "`n" + ("=" * 70) -ForegroundColor Red
+        Write-Host "   Golden Image Build Failed!" -ForegroundColor Red
+        Write-Host ("=" * 70) -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Check the log file for detailed error information." -ForegroundColor Yellow
+        throw
+    }
+}
+
+function Show-DeploymentInstructions {
+    <#
+    .SYNOPSIS
+        Shows instructions for deploying VMs with the new golden image
+    #>
+    [CmdletBinding()]
+    param()
+    
+    $config = Get-WorkflowConfig
+    $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+    $vagrantDir = Join-Path $projectRoot "vagrant"
+    
+    Write-Host "Deployment Instructions:" -ForegroundColor Yellow
+    Write-Host "You can now deploy VMs using the new golden image:" -ForegroundColor White
+    Write-Host ""
+    
+    foreach ($env in $config.environments.PSObject.Properties) {
+        $envConfig = $env.Value
+        $envPath = Join-Path $vagrantDir $env.Name
+        Write-Host "  $($env.Name.ToUpper()) ($($envConfig.description)):" -ForegroundColor Cyan
+        Write-Host "    Set-Location '$envPath'" -ForegroundColor Gray
+        Write-Host "    vagrant up --provider=hyperv" -ForegroundColor Gray
+        Write-Host ""
+    }
+    
+    # Check for running VMs
+    Write-Host "Checking for running VMs that may need updates..." -ForegroundColor Yellow
+    try {
         $runningVMs = Get-RunningVagrantVMs -VagrantBaseDir $vagrantDir
         if ($runningVMs.Count -gt 0) {
             Write-Host "`nWARNING: The following VMs are running with the old golden image:" -ForegroundColor Yellow
             $runningVMs | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
-            Write-Host "Consider recreating them to use the new golden image:" -ForegroundColor Yellow
+            Write-Host "`nTo update them with the new golden image:" -ForegroundColor Yellow
             $runningVMs | ForEach-Object {
                 $envPath = Join-Path $vagrantDir $_
-                Write-Host "  Set-Location '$envPath'; vagrant destroy -f; vagrant up --provider=hyperv" -ForegroundColor White
+                Write-Host "  Set-Location '$envPath'; vagrant destroy -f; vagrant up --provider=hyperv" -ForegroundColor Gray
             }
         }
         else {
-            Write-Host "No running VMs detected - all future VMs will use the new golden image" -ForegroundColor Green
+            Write-Host "✓ No running VMs detected - all future VMs will use the new golden image" -ForegroundColor Green
         }
     }
     catch {
-        Write-Error "Golden image build failed: $($_.Exception.Message)"
-        throw
+        Write-Warning "Could not check for running VMs: $($_.Exception.Message)"
     }
 }
-#endregion
+
+function Get-RunningVagrantVMs {
+    <#
+    .SYNOPSIS
+        Gets list of running Vagrant VMs
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$VagrantBaseDir
+    )
+    
+    if (-not $VagrantBaseDir) {
+        $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+        $VagrantBaseDir = Join-Path $projectRoot "vagrant"
+    }
+    
+    $config = Get-WorkflowConfig
+    $environments = $config.environments.PSObject.Properties.Name
+    $runningVMs = @()
+    $originalLocation = Get-Location
+    
+    try {
+        foreach ($env in $environments) {
+            $envPath = Join-Path $VagrantBaseDir $env
+            
+            if (Test-Path $envPath) {
+                try {
+                    Set-Location $envPath
+                    $status = & vagrant status 2>$null
+                    
+                    if ($status -and ($status -match "running")) {
+                        $runningVMs += $env
+                    }
+                }
+                catch {
+                    Write-Verbose "Could not check status for environment: $env"
+                }
+            }
+        }
+    }
+    finally {
+        Set-Location $originalLocation
+    }
+    
+    return $runningVMs
+}
 
 function Invoke-BuildCheck {
+    <#
+    .SYNOPSIS
+        Checks if a build is needed
+    #>
     [CmdletBinding()]
     param()
     
     try {
-        $needsRebuild = Test-BoxAge -BoxName $BoxName -MaxAgeDays $DaysBeforeRebuild
+        $boxInfo = Get-CurrentBoxInfo -BoxName $script:effectiveBoxName
         
-        Write-Host "Box: $BoxName" -ForegroundColor Cyan
-        Write-Host "Rebuild needed: $needsRebuild" -ForegroundColor $(if ($needsRebuild) { "Yellow" } else { "Green" })
+        Write-Host "`nGolden Image Status:" -ForegroundColor Cyan
+        Write-Host "Box: $script:effectiveBoxName" -ForegroundColor White
         
-        exit $(if ($needsRebuild) { 1 } else { 0 })
+        if ($boxInfo.Exists) {
+            Write-Host "Age: $($boxInfo.AgeDays) days" -ForegroundColor White
+            Write-Host "Last Modified: $($boxInfo.LastModified)" -ForegroundColor White
+            Write-Host "Rebuild Needed: $($boxInfo.NeedsRebuild)" -ForegroundColor $(if ($boxInfo.NeedsRebuild) { "Yellow" } else { "Green" })
+        }
+        else {
+            Write-Host "Status: Not Found" -ForegroundColor Red
+            Write-Host "Rebuild Needed: Yes" -ForegroundColor Yellow
+        }
+        
+        exit $(if ($boxInfo.NeedsRebuild) { 1 } else { 0 })
     }
     catch {
         Write-Error "Failed to check build status: $($_.Exception.Message)"
         exit 2
     }
 }
+
+function New-WeeklyScheduledTask {
+    <#
+    .SYNOPSIS
+        Creates a scheduled task for weekly builds
+    #>
+    [CmdletBinding()]
+    param()
+    
+    $config = Get-WorkflowConfig
+    $taskName = $config.golden_image.scheduled_task_name
+    $taskDescription = "Weekly Windows Server 2025 Golden Image Build"
+    
+    try {
+        Write-Host "Creating scheduled task for weekly builds..." -ForegroundColor Yellow
+        
+        # Remove existing task
+        $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existingTask) {
+            Write-Host "Removing existing scheduled task..." -ForegroundColor Gray
+            $null = Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+        }
+        
+        # Create new task
+        $scriptPath = $PSCommandPath
+        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`""
+        
+        $triggerTime = $config.golden_image.scheduled_time
+        $triggerDay = $config.golden_image.scheduled_day
+        $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $triggerDay -At $triggerTime
+        
+        $timeoutMinutes = $config.packer.timeout_minutes
+        $retryAttempts = $config.packer.retry_attempts
+        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes $timeoutMinutes) -RestartCount $retryAttempts
+        
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+        
+        $null = Register-ScheduledTask -TaskName $taskName -Description $taskDescription -Action $action -Trigger $trigger -Settings $settings -Principal $principal
+        
+        Write-Host "✓ Scheduled task '$taskName' created successfully" -ForegroundColor Green
+        Write-Host "Task will run every $triggerDay at $triggerTime" -ForegroundColor White
+        
+        # Show task information
+        $task = Get-ScheduledTask -TaskName $taskName
+        Write-Host "`nTask Details:" -ForegroundColor Yellow
+        Write-Host "  Name: $($task.TaskName)" -ForegroundColor White
+        Write-Host "  State: $($task.State)" -ForegroundColor White
+        Write-Host "  Next Run: $((Get-ScheduledTask -TaskName $taskName | Get-ScheduledTaskInfo).NextRunTime)" -ForegroundColor White
+        
+    }
+    catch {
+        throw "Failed to create scheduled task: $($_.Exception.Message)"
+    }
+}
 #endregion
 
 #region Main Execution
 try {
-    # Initialize
-    Initialize-Logging
+    # Initialize configuration and logging
+    Initialize-WorkflowConfiguration -ConfigPath $ConfigPath
+    Initialize-WorkflowLogging -ScriptName "Build-WeeklyGoldenImage"
     
-    if ($ConfigPath) {
-        Import-Configuration -Path $ConfigPath
+    $config = Get-WorkflowConfig
+    
+    # Set effective parameters from config or parameters
+    $script:effectiveBoxName = if ($BoxName) { $BoxName } else { $config.golden_image.box_name }
+    $script:effectiveDaysBeforeRebuild = if ($DaysBeforeRebuild) { $DaysBeforeRebuild } else { $config.golden_image.rebuild_interval_days }
+    
+    # Find ISO path
+    if ($IsoPath) {
+        $script:effectiveIsoPath = ConvertTo-AbsolutePath -Path $IsoPath
+    }
+    else {
+        $foundIso = Find-WindowsServerIso
+        if ($foundIso) {
+            $script:effectiveIsoPath = $foundIso
+        }
+        else {
+            throw "Windows Server ISO not found. Please specify -IsoPath or place ISO in one of the default locations."
+        }
     }
     
     # Execute based on parameter set
     switch ($PSCmdlet.ParameterSetName) {
         'Schedule' {
             Write-Host "Setting up weekly scheduled task..." -ForegroundColor Yellow
-            New-WeeklyScheduledTask -ScriptPath $PSCommandPath
+            New-WeeklyScheduledTask
             exit 0
         }
         'Check' {
             Invoke-BuildCheck
         }
         'Build' {
-            Invoke-GoldenImageBuild
+            if ($Interactive) {
+                $action = Show-InteractiveMenu
+                switch ($action) {
+                    "build" { Invoke-GoldenImageBuild }
+                    "check" { Invoke-BuildCheck }
+                    "schedule" { New-WeeklyScheduledTask }
+                    "quit" { 
+                        Write-Host "Exiting..." -ForegroundColor Yellow
+                        exit 0
+                    }
+                    default { 
+                        Write-Host "Unknown action: $action" -ForegroundColor Red
+                        exit 1
+                    }
+                }
+            }
+            else {
+                Invoke-GoldenImageBuild
+            }
         }
     }
 }
@@ -1243,5 +1137,5 @@ catch {
     exit 1
 }
 finally {
-    Stop-Logging
+    Stop-WorkflowLogging
 }
