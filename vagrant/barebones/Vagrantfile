@@ -3,7 +3,7 @@
 
 Vagrant.configure("2") do |config|
   # Use the golden image
-  config.vm.box = "windows-server-2025-golden"
+  config.vm.box = "windows-server-2022-golden"
   
   # Prompt for VM name and drive configuration
   vm_name = nil
@@ -111,7 +111,7 @@ Vagrant.configure("2") do |config|
   # Minimal provisioning - only essential tasks
   config.vm.provision "powershell", inline: <<-SHELL, env: {"DRIVE_LETTER" => drive_letter, "DRIVE_NAME" => drive_name}
     Write-Host ("=" * 60) 
-    Write-Host "=== Barebones Windows Server 2025 Configuration Starting ===" -ForegroundColor Green
+    Write-Host "=== Barebones Windows Server 2022 Configuration Starting ===" -ForegroundColor Green
     Write-Host ("=" * 60) 
     
     $DriveLetter = $env:DRIVE_LETTER
@@ -216,7 +216,7 @@ Vagrant.configure("2") do |config|
   # Final status report
   config.vm.provision "powershell", inline: <<-SHELL, env: {"DRIVE_LETTER" => drive_letter, "DRIVE_NAME" => drive_name}
     Write-Host ("=" * 60) 
-    Write-Host "BAREBONES WINDOWS SERVER 2025 READY" -ForegroundColor Green
+    Write-Host "BAREBONES WINDOWS SERVER 2022 READY" -ForegroundColor Green
     Write-Host ("=" * 60) 
     
     $DriveLetter = $env:DRIVE_LETTER
@@ -253,6 +253,6 @@ Vagrant.configure("2") do |config|
     Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv4-In)" -ErrorAction SilentlyContinue
     Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv6-In)" -ErrorAction SilentlyContinue
     
-    Write-Host "`nBarebones setup complete - minimal Windows Server 2025 ready!" -ForegroundColor Green
+    Write-Host "`nBarebones setup complete - minimal Windows Server 2022 ready!" -ForegroundColor Green
   SHELL
 end

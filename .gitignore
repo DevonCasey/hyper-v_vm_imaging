@@ -32,3 +32,6 @@ output-hyperv-iso/
 # Build artifacts
 *.box
 boxes/
+
+# ISO files
+*.iso

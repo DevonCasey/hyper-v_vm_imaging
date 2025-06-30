@@ -230,10 +230,23 @@ if ($ConfigureNetworking) {
 
 Write-Host ("=" * 60) 
 
-
 # Create project directories
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Write-Host "Project structure created at: $ProjectRoot" -ForegroundColor Green
+
+# Install windows sdk deployment tools if not present
+try { 
+    if (!(Get-Command "WindowsSDKDeploymentTools" -ErrorAction SilentlyContinue)) {
+        Write-Host "Installing Windows SDK Deployment Tools..." -ForegroundColor Yellow
+        choco install windows-sdk-10.1 -y
+    }
+    else {
+        Write-Host "Windows SDK Deployment Tools already installed." -ForegroundColor Green
+    } 
+}
+catch {
+    Write-Warning "Failed to install Windows SDK Deployment Tools: $($_.Exception.Message)"
+}
 
 Write-Host "`nSetup complete!" -ForegroundColor Green
 Write-Host "`nNext steps:" 
