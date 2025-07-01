@@ -9,18 +9,18 @@ packer {
 
 variable "iso_url" {
   type        = string
-  description = "URL or path to Windows Server 2025 ISO"
-  default     = "F:\\Install\\Microsoft\\Windows Server\\WinServer_2025.iso"
+  description = "URL or path to Windows Server 2019 ISO"
+  default     = "F:\\Install\\Microsoft\\Windows Server\\WinServer_2019.iso"
 }
 
 variable "VirtualMachineName" {
   type    = string
-  default = "windows-server-2025"
+  default = "windows-server-2019"
 }
 
 variable "OutputDirectory" {
   type    = string
-  default = "E:\\packer\\output-hyperv-iso"
+  default = "E:\\packer\\output-hyperv-iso-2019"
 }
 
 variable "WinRMUsername" {
@@ -56,43 +56,43 @@ variable "disk_size" {
 variable "enable_secure_boot" {
   type        = bool
   description = "Enable Secure Boot for the VM"
-  default     = true
+  default     = false
 }
 
 variable "enable_tpm" {
   type        = bool
   description = "Enable TPM (Trusted Platform Module) for the VM"
-  default     = true
+  default     = false
 }
 
-source "hyperv-iso" "windows-server-2025" {
+source "hyperv-iso" "windows-server-2019" {
   vm_name          = var.VirtualMachineName
   iso_url          = var.iso_url
-  iso_checksum     = "none" # TODO: Add proper checksum validation
+  iso_checksum     = "none"  # TODO: Add proper checksum validation
   output_directory = var.OutputDirectory
-
+  
   # VM resources - Generation 2 (UEFI)
   cpus       = var.cpus
   memory     = var.memory
   disk_size  = var.disk_size
   generation = 2
-
-  # Hyper-V specific settings - Minimal for troubleshooting
+  
+  # Hyper-V specific settings - Conservative for 2019
   switch_name                      = var.switch_name
-  enable_secure_boot               = false  # Disabled for troubleshooting
+  enable_secure_boot               = var.enable_secure_boot
   enable_virtualization_extensions = false
-  enable_tpm                       = false  # Disabled for troubleshooting
+  enable_tpm                       = var.enable_tpm
   guest_additions_mode             = "disable"
   enable_mac_spoofing              = false
   enable_dynamic_memory            = false
-
-  # Boot settings - Let Windows handle everything automatically
-  boot_wait = "1s"
+  
+  # Boot settings - Conservative approach for Windows Server 2019
+  boot_wait = "5s"
   boot_command = [
-    # No input - let autounattend.xml handle everything
-    "<wait120s>"
+    # Simple approach - just send enter and wait for autounattend.xml to take over
+    "<enter><wait60s>"
   ]
-
+  
   # Communication settings
   communicator   = "winrm"
   winrm_username = var.WinRMUsername
@@ -102,29 +102,25 @@ source "hyperv-iso" "windows-server-2025" {
   winrm_use_ssl  = false
   winrm_insecure = true
   winrm_use_ntlm = false
-
+  
   # Shutdown command
   shutdown_command = "shutdown /s /t 10 /f /d p:4:1 /c \"Packer Shutdown\""
   shutdown_timeout = "15m"
 }
 
 build {
-  name    = "windows-server-2025"
-  sources = ["source.hyperv-iso.windows-server-2025"]
-
+  name = "windows-server-2019"
+  sources = ["source.hyperv-iso.windows-server-2019"]
+  
   # Wait for system to be fully ready
   provisioner "powershell" {
     inline = [
-      "Write-Host 'Waiting for system to be fully ready...' -ForegroundColor Yellow",
-      "Start-Sleep -Seconds 30", # Shorter wait for initial check
-      "Write-Host 'Testing basic connectivity...' -ForegroundColor Yellow",
-      "Test-NetConnection -ComputerName localhost -Port 5985 -InformationLevel Quiet",
-      "Write-Host 'System ready, continuing with provisioning...' -ForegroundColor Green"
+      "Write-Host 'Waiting for system to be ready...'",
+      "Start-Sleep -Seconds 30"
     ]
-    timeout = "15m"
   }
-
-  # Basic system configuration using external scripts
+  
+  # Basic system configuration
   provisioner "powershell" {
     scripts = [
       "scripts/01-configure-winrm.ps1",
@@ -134,7 +130,6 @@ build {
       "scripts/05-install-updates.ps1"
     ]
     valid_exit_codes = [0, 1, 2, 3010]
-    timeout = "120m" # Increased timeout for Windows updates
   }
   
   # Final cleanup and preparation
@@ -143,9 +138,8 @@ build {
       "scripts/99-cleanup.ps1"
     ]
     valid_exit_codes = [0, 1, 2]
-    timeout = "30m"
   }
-
+  
   # Create Vagrant-specific configuration
   provisioner "powershell" {
     inline = [

@@ -36,7 +36,7 @@
       }
     },
     "golden_image": {
-      "box_name": "windows-server-2025-golden",
+      "box_name": "windows-server-golden",
       "rebuild_interval_days": 7,
       "scheduled_task_name": "Build-WeeklyGoldenImage",
       "scheduled_time": "02:00",
