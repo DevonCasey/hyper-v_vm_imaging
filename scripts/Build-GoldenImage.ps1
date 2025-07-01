@@ -10,7 +10,10 @@
     Name of the Vagrant box to create (uses config default if not specified)
 
 .PARAMETER IsoPath
-    Path to the Windows Server 2025 ISO file (auto-detected if not specified)
+    Path to the original Windows Server ISO file. Optional if a custom ISO for the specified WindowsVersion already exists.
+
+.PARAMETER WindowsVersion
+    Windows Server version to build (2019 or 2025). Default: 2025. Used to locate existing custom ISOs.
 
 .PARAMETER ConfigPath
     Path to custom configuration file (JSON format)
@@ -30,20 +33,49 @@
 .PARAMETER Interactive
     Enable interactive mode with menus and prompts
 
+.PARAMETER CreateIsoOnly
+    Create only the custom Windows Server 2025 ISO with autounattend.xml and exit
+
+.PARAMETER PatchNoPrompt
+    Apply no-prompt EFI boot file patching to eliminate "press any key" boot prompt
+
+.PARAMETER CheckImageIndexes
+    Check and display available Windows image indexes in the specified ISO file and exit
+
 .EXAMPLE
-    .\Build-WeeklyGoldenImage.ps1
+    .\Build-GoldenImage.ps1
     Build with default settings (auto-detect ISO, use config defaults)
 
 .EXAMPLE
-    .\Build-WeeklyGoldenImage.ps1 -Force -Interactive
+    .\Build-GoldenImage.ps1 -Force -Interactive
     Force rebuild with interactive prompts
 
 .EXAMPLE
-    .\Build-WeeklyGoldenImage.ps1 -ConfigPath ".\custom-config.json"
+    .\Build-GoldenImage.ps1 -CreateIsoOnly -IsoPath "C:\ISOs\WinServer_2025.iso"
+    Create only the custom ISO with autounattend.xml
+
+.EXAMPLE
+    .\Build-GoldenImage.ps1 -CheckImageIndexes -IsoPath "C:\ISOs\WinServer_2025.iso"
+    Check and display available Windows image indexes in the ISO
+
+.EXAMPLE
+    .\Build-GoldenImage.ps1 -WindowsVersion 2019
+    Build Windows Server 2019 using existing custom ISO (if available) or auto-detect original ISO
+
+.EXAMPLE
+    .\Build-GoldenImage.ps1 -WindowsVersion 2019 -IsoPath "F:\Install\Microsoft\Windows Server\WinServer_2019.iso"
+    Build Windows Server 2019 golden image with specific original ISO
+
+.EXAMPLE
+    .\Build-GoldenImage.ps1 -CreateIsoOnly -WindowsVersion 2019 -IsoPath "F:\Install\Microsoft\Windows Server\WinServer_2019.iso"
+    Create only the custom Windows Server 2019 ISO
+
+.EXAMPLE
+    .\Build-GoldenImage.ps1 -ConfigPath ".\custom-config.json"
     Use custom configuration file
 
 .EXAMPLE
-    .\Build-WeeklyGoldenImage.ps1 -CheckOnly
+    .\Build-GoldenImage.ps1 -CheckOnly
     Check if rebuild is needed without building
 
 .NOTES
@@ -58,11 +90,19 @@ param(
     [string]$BoxName,
     
     [Parameter(ParameterSetName = 'Build')]
+    [Parameter(ParameterSetName = 'CreateIso')]
+    [Parameter(ParameterSetName = 'CheckImages', Mandatory = $true)]
     [ValidateScript({
             if (-not $_ -or (Test-Path $_ -PathType Leaf)) { $true }
             else { throw "ISO file not found: $_" }
         })]
     [string]$IsoPath,
+    
+    [Parameter(ParameterSetName = 'Build')]
+    [Parameter(ParameterSetName = 'CreateIso')]
+    [Parameter(ParameterSetName = 'CheckImages')]
+    [ValidateSet('2019', '2025')]
+    [string]$WindowsVersion = '2025',
     
     [Parameter(ParameterSetName = 'Build')]
     [Parameter(ParameterSetName = 'Check')]
@@ -87,7 +127,17 @@ param(
     [int]$DaysBeforeRebuild,
     
     [Parameter(ParameterSetName = 'Build')]
-    [switch]$Interactive
+    [switch]$Interactive,
+    
+    [Parameter(ParameterSetName = 'CreateIso')]
+    [switch]$CreateIsoOnly,
+    
+    [Parameter(ParameterSetName = 'Build')]
+    [Parameter(ParameterSetName = 'CreateIso')]
+    [switch]$PatchNoPrompt,
+    
+    [Parameter(ParameterSetName = 'CheckImages')]
+    [switch]$CheckImageIndexes
 )
 
 #region Module Imports
@@ -117,9 +167,9 @@ function Show-InteractiveMenu {
     param()
     
     Clear-Host
-    Write-Host "=" * 70 -ForegroundColor Green
-    Write-Host "   Windows Server 2025 Golden Image Builder v2.0" -ForegroundColor Green
-    Write-Host "=" * 70 -ForegroundColor Green
+    Write-Host ("=" * 70) -ForegroundColor Green
+    Write-Host "   Windows Server Golden Image Builder v2.0" -ForegroundColor Green
+    Write-Host ("=" * 70) -ForegroundColor Green
     Write-Host ""
     
     $currentBox = Get-CurrentBoxInfo -BoxName $script:effectiveBoxName
@@ -144,14 +194,15 @@ function Show-InteractiveMenu {
     Write-Host "  1. Build Golden Image Now" -ForegroundColor White
     Write-Host "  2. Force Rebuild (ignore age)" -ForegroundColor White
     Write-Host "  3. Check Build Status Only" -ForegroundColor White
-    Write-Host "  4. Schedule Weekly Builds" -ForegroundColor White
-    Write-Host "  5. Configure Settings" -ForegroundColor White
-    Write-Host "  6. View System Information" -ForegroundColor White
+    Write-Host "  4. Create Custom ISO Only" -ForegroundColor White
+    Write-Host "  5. Schedule Weekly Builds" -ForegroundColor White
+    Write-Host "  6. Configure Settings" -ForegroundColor White
+    Write-Host "  7. View System Information" -ForegroundColor White
     Write-Host "  Q. Quit" -ForegroundColor White
     Write-Host ""
     
     do {
-        $choice = Read-Host "Select an option (1-6, Q)"
+        $choice = Read-Host "Select an option (1-7, Q)"
         
         switch ($choice.ToUpper()) {
             "1" { return "build" }
@@ -160,13 +211,14 @@ function Show-InteractiveMenu {
                 return "build"
             }
             "3" { return "check" }
-            "4" { return "schedule" }
-            "5" { 
+            "4" { return "createiso" }
+            "5" { return "schedule" }
+            "6" { 
                 Show-ConfigurationMenu
                 Show-InteractiveMenu
                 return
             }
-            "6" { 
+            "7" { 
                 Show-SystemInformation
                 Read-Host "`nPress Enter to continue"
                 Show-InteractiveMenu
@@ -174,7 +226,7 @@ function Show-InteractiveMenu {
             }
             "Q" { return "quit" }
             default { 
-                Write-Host "Invalid selection. Please choose 1-6 or Q." -ForegroundColor Red
+                Write-Host "Invalid selection. Please choose 1-7 or Q." -ForegroundColor Red
             }
         }
     } while ($true)
@@ -446,7 +498,37 @@ function Reset-ToDefaults {
 function New-CustomIso {
     <#
     .SYNOPSIS
-        Creates a custom Windows ISO with embedded autounattend.xml
+        Creates a custom Windows ISO with embedded autounattend.xml and automatic boot prompt elimination
+    
+    .DESCRIPTION
+        This function creates a bootable Windows ISO with the following automatic modifications:
+        1. Embeds autounattend.xml for automated installation
+        2. Automatically eliminates "press any key" boot prompt if no-prompt EFI files are available
+        3. Copies additional packer scripts if available
+        4. Creates a fully bootable ISO optimized for automated deployment
+        
+        Boot Prompt Elimination:
+        If the source ISO contains efisys_noprompt.bin and cdboot_noprompt.efi in \efi\microsoft\boot\,
+        these will automatically replace the standard boot files to eliminate the "press any key" prompt
+        that can cause PXE boot fallback issues in automated environments.
+        
+        Sources for no-prompt files:
+        - Windows 11 ISOs (already include no-prompt versions)
+        - Windows ADK deployment tools
+        - NTLite-modified ISOs
+        - Manual extraction from newer Windows versions
+        
+    .PARAMETER SourceIsoPath
+        Path to the source Windows Server ISO
+        
+    .PARAMETER OutputIsoPath
+        Path where the custom ISO will be created
+        
+    .PARAMETER UnattendXmlPath
+        Path to the autounattend.xml file to embed
+        
+    .EXAMPLE
+        New-CustomIso -SourceIsoPath "C:\ISOs\WinServer_2025.iso" -OutputIsoPath "C:\ISOs\Custom_WinServer_2025.iso" -UnattendXmlPath "C:\autounattend.xml"
     #>
     [CmdletBinding()]
     param(
@@ -490,10 +572,59 @@ function New-CustomIso {
         Copy-Item "$driveLetter\*" $workingDir -Recurse -Force
         Dismount-DiskImage -ImagePath $SourceIsoPath | Out-Null
         
-        # Add autounattend.xml to the ROOT of the ISO
+        # Add autounattend.xml to the ROOT of the ISO (always named autounattend.xml)
         Write-WorkflowProgress -Activity "Creating Custom ISO" -Status "Adding autounattend.xml..." -PercentComplete 60
         $autounattendDestination = Join-Path $workingDir "autounattend.xml"
         Copy-Item $UnattendXmlPath $autounattendDestination -Force
+        Write-Information "Added autounattend.xml from: $UnattendXmlPath" -InformationAction Continue
+        
+        # Modify EFI boot files to eliminate "press any key" prompt
+        Write-WorkflowProgress -Activity "Creating Custom ISO" -Status "Configuring EFI boot files to eliminate boot prompt..." -PercentComplete 65
+        $efiBootPath = Join-Path $workingDir "efi\microsoft\boot"
+        if (Test-Path $efiBootPath) {
+            try {
+                # Check if the no-prompt versions exist
+                $efisysNoprompt = Join-Path $efiBootPath "efisys_noprompt.bin"
+                $cdbootNoprompt = Join-Path $efiBootPath "cdboot_noprompt.efi"
+                $efisysOriginal = Join-Path $efiBootPath "efisys.bin"
+                $cdbootOriginal = Join-Path $efiBootPath "cdboot.efi"
+                
+                if ((Test-Path $efisysNoprompt) -and (Test-Path $cdbootNoprompt)) {
+                    Write-Information "Found no-prompt EFI boot files, replacing originals to eliminate boot prompt..." -InformationAction Continue
+                    
+                    # Backup original files
+                    if (Test-Path $efisysOriginal) {
+                        Copy-Item $efisysOriginal "$efisysOriginal.backup" -Force
+                        Remove-Item $efisysOriginal -Force
+                    }
+                    if (Test-Path $cdbootOriginal) {
+                        Copy-Item $cdbootOriginal "$cdbootOriginal.backup" -Force
+                        Remove-Item $cdbootOriginal -Force
+                    }
+                    
+                    # Replace with no-prompt versions
+                    Copy-Item $efisysNoprompt $efisysOriginal -Force
+                    Copy-Item $cdbootNoprompt $cdbootOriginal -Force
+                    
+                    Write-Information "EFI boot files successfully modified - ISO will boot without 'press any key' prompt" -InformationAction Continue
+                }
+                else {
+                    Write-Warning "No-prompt EFI boot files (efisys_noprompt.bin, cdboot_noprompt.efi) not found in source ISO."
+                    Write-Information "ISO will retain the 'press any key' prompt. To eliminate this:" -InformationAction Continue
+                    Write-Information "  1. Use a Windows 11 ISO (includes no-prompt files)" -InformationAction Continue
+                    Write-Information "  2. Extract no-prompt files from Windows ADK" -InformationAction Continue
+                    Write-Information "  3. Use NTLite to modify the ISO" -InformationAction Continue
+                    Write-Information "Continuing with standard boot files..." -InformationAction Continue
+                }
+            }
+            catch {
+                Write-Warning "Failed to modify EFI boot files: $($_.Exception.Message)"
+                Write-Information "Continuing with standard boot files..." -InformationAction Continue
+            }
+        }
+        else {
+            Write-Warning "EFI boot path not found. This may not be a UEFI-compatible ISO."
+        }
         
         # Try to copy scripts directory
         $scriptsSource = Join-Path (Split-Path $PSScriptRoot -Parent) "packer\scripts"
@@ -538,16 +669,41 @@ function New-CustomIso {
             throw "oscdimg failed with exit code: $LASTEXITCODE"
         }
         
+        # Verify the custom ISO
         Write-WorkflowProgress -Activity "Creating Custom ISO" -Status "Verifying custom ISO..." -PercentComplete 95
         
-        # Verify the custom ISO
         $verifyMount = Mount-DiskImage -ImagePath $OutputIsoPath -PassThru
         $verifyDrive = ($verifyMount | Get-Volume).DriveLetter + ":"
+        
+        # Check for autounattend.xml
         $autounattendExists = Test-Path "$verifyDrive\autounattend.xml"
+        
+        # Check for Windows image information
+        $wimPath = "$verifyDrive\sources\install.wim"
+        $installWimExists = Test-Path $wimPath
+        
+        if ($installWimExists) {
+            try {
+                # Try to get WIM image information
+                $wimInfo = & dism /Get-WimInfo /WimFile:$wimPath
+                Write-Information "Available Windows images in ISO:" -InformationAction Continue
+                $wimInfo | Where-Object { $_ -match "Index|Name" } | ForEach-Object {
+                    Write-Information "  $_" -InformationAction Continue
+                }
+            }
+            catch {
+                Write-Verbose "Could not read WIM information: $($_.Exception.Message)"
+            }
+        }
+        
         Dismount-DiskImage -ImagePath $OutputIsoPath | Out-Null
         
         if (-not $autounattendExists) {
             throw "autounattend.xml not found in custom ISO root after verification"
+        }
+        
+        if (-not $installWimExists) {
+            Write-Warning "install.wim not found in custom ISO - this may not be a valid Windows installation ISO"
         }
         
         Write-WorkflowProgress -Activity "Creating Custom ISO" -Status "Complete" -PercentComplete 100
@@ -579,7 +735,6 @@ function Invoke-PackerBuild {
     )
     
     $originalLocation = Get-Location
-    $config = Get-WorkflowConfig
     
     try {
         # Change to packer directory
@@ -794,13 +949,8 @@ function Invoke-GoldenImageBuild {
         Test-Prerequisites
         Test-HyperVEnvironment
         
-        # Validate ISO
-        Write-WorkflowProgress -Activity "Golden Image Build" -Status "Validating ISO file..." -PercentComplete 10
-        if ([string]::IsNullOrWhiteSpace($script:effectiveIsoPath) -or -not (Test-Path $script:effectiveIsoPath)) {
-            throw "effectiveIsoPath is not a valid string path: $($script:effectiveIsoPath)"
-        }
-
-        Test-IsoFile -Path $script:effectiveIsoPath
+        # Validate ISO (will be checked later when determining if custom ISO creation is needed)
+        Write-WorkflowProgress -Activity "Golden Image Build" -Status "Preparing for build..." -PercentComplete 10
         
         # Check if rebuild is needed
         if (-not $Force) {
@@ -818,19 +968,26 @@ function Invoke-GoldenImageBuild {
         $config = Get-WorkflowConfig
         $projectRoot = Split-Path $PSScriptRoot -Parent
         $packerDir = Join-Path $projectRoot "packer"
-        $boxesDir = Join-Path $projectRoot $config.global.boxes_directory
+        
+        # Use E: drive for storage (E: has the most available space)
+        $packerStorageDir = "E:\packer"
+        $boxesStorageDir = "E:\vagrant"
+        
+        # Get version-specific paths
+        $versionPaths = Get-VersionSpecificPaths -WindowsVersion $WindowsVersion -PackerDir $packerDir
         
         # Ensure directories exist
-        @($boxesDir) | ForEach-Object {
+        @($packerStorageDir, $boxesStorageDir) | ForEach-Object {
             if (-not (Test-Path $_)) {
+                Write-Host "Creating directory: $_" -ForegroundColor Yellow
                 $null = New-Item -ItemType Directory -Path $_ -Force
             }
         }
         
-        # Prepare file paths
-        $unattendXmlPath = Join-Path $packerDir "autounattend.xml"
-        $packerConfigPath = Join-Path $packerDir "windows-server-2025.pkr.hcl"
-        $customIsoPath = Join-Path $packerDir "custom_windows_server_2025.iso"
+        # Prepare file paths - configs from project, outputs to E: drive
+        $unattendXmlPath = $versionPaths.AutoUnattend
+        $packerConfigPath = $versionPaths.PackerConfig
+        $customIsoPath = Join-Path $packerStorageDir $versionPaths.CustomIsoName
         
         # Validate required files exist
         @($unattendXmlPath, $packerConfigPath) | ForEach-Object {
@@ -839,15 +996,19 @@ function Invoke-GoldenImageBuild {
             }
         }
         
-        # Remove existing custom ISO
-        if (Test-Path $customIsoPath) {
-            Write-WorkflowProgress -Activity "Golden Image Build" -Status "Cleaning previous build artifacts..." -PercentComplete 20
-            Remove-Item $customIsoPath -Force
+        # Check if custom ISO already exists, if not create it
+        if (-not (Test-Path $customIsoPath)) {
+            # Custom ISO doesn't exist - need to create it
+            if ($null -eq $script:effectiveIsoPath) {
+                throw "Custom ISO not found and no original ISO available to create it. Please provide -IsoPath with the original Windows Server $WindowsVersion ISO."
+            }
+            Write-WorkflowProgress -Activity "Golden Image Build" -Status "Creating custom Windows ISO..." -PercentComplete 25
+            New-CustomIso -SourceIsoPath $script:effectiveIsoPath -OutputIsoPath $customIsoPath -UnattendXmlPath $unattendXmlPath
         }
-        
-        # Create custom ISO with autounattend.xml
-        Write-WorkflowProgress -Activity "Golden Image Build" -Status "Creating custom Windows ISO..." -PercentComplete 25
-        New-CustomIso -SourceIsoPath $script:effectiveIsoPath -OutputIsoPath $customIsoPath -UnattendXmlPath $unattendXmlPath
+        else {
+            Write-WorkflowProgress -Activity "Golden Image Build" -Status "Using existing custom ISO..." -PercentComplete 25
+            Write-Information "Using existing custom ISO: $customIsoPath" -InformationAction Continue
+        }
         
         # Execute Packer build
         Write-WorkflowProgress -Activity "Golden Image Build" -Status "Starting Packer build (this may take 30-60 minutes)..." -PercentComplete 30
@@ -855,25 +1016,27 @@ function Invoke-GoldenImageBuild {
         
         # Package as Vagrant box
         Write-WorkflowProgress -Activity "Golden Image Build" -Status "Packaging as Vagrant box..." -PercentComplete 85
-        $packerOutputDir = Join-Path $packerDir "output-hyperv-iso"
+        $packerOutputDir = $versionPaths.OutputDir
+        
+        # Use version-specific box name if not overridden
+        $effectiveBoxName = if ($BoxName) { $BoxName } else { $versionPaths.BoxName }
         
         if ($Force) {
             try {
-                & vagrant box remove $script:effectiveBoxName --provider hyperv --force 2>$null
-                Write-Information "Removed existing box: $script:effectiveBoxName" -InformationAction Continue
+                & vagrant box remove $effectiveBoxName --provider hyperv --force 2>$null
+                Write-Information "Removed existing box: $effectiveBoxName" -InformationAction Continue
             }
             catch {
                 Write-Verbose "No existing box to remove"
             }
         }
         
-        New-VagrantBoxFromPacker -BoxName $script:effectiveBoxName -PackerOutputDirectory $packerOutputDir -VagrantBoxDirectory $boxesDir
+        New-VagrantBoxFromPacker -BoxName $effectiveBoxName -PackerOutputDirectory $packerOutputDir -VagrantBoxDirectory $boxesStorageDir
         
-        # Cleanup
+        # Cleanup (preserve custom ISO for reuse)
         Write-WorkflowProgress -Activity "Golden Image Build" -Status "Cleaning up temporary files..." -PercentComplete 95
-        if (Test-Path $customIsoPath) {
-            Remove-Item $customIsoPath -Force -ErrorAction SilentlyContinue
-        }
+        # Note: We're preserving the custom ISO for reuse in future builds
+        Write-Information "Preserving custom ISO for reuse: $customIsoPath" -InformationAction Continue
         
         # Final summary
         Write-Progress -Activity "Golden Image Build" -Completed
@@ -886,6 +1049,9 @@ function Invoke-GoldenImageBuild {
         Write-Host ""
         Write-Host "Build Summary:" -ForegroundColor Yellow
         Write-Host "  Total time: $($totalDuration.ToString('hh\:mm\:ss'))" -ForegroundColor White
+        if ($buildDuration) {
+            Write-Host "  Packer build time: $($buildDuration.ToString('hh\:mm\:ss'))" -ForegroundColor White
+        }
         Write-Host "  Box name: $script:effectiveBoxName" -ForegroundColor White
         Write-Host "  Built on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor White
         Write-Host "  Next build needed after: $($nextBuildDate.ToString('yyyy-MM-dd'))" -ForegroundColor White
@@ -1086,44 +1252,317 @@ function New-WeeklyScheduledTask {
         throw "Failed to create scheduled task: $($_.Exception.Message)"
     }
 }
+
+function Invoke-CustomIsoCreation {
+    <#
+    .SYNOPSIS
+        Creates a custom Windows Server 2025 ISO with autounattend.xml as a standalone operation
+    
+    .DESCRIPTION
+        This function creates a custom bootable ISO with embedded autounattend.xml that can be preserved
+        between script runs. The ISO is created in the packer directory and will not be automatically cleaned up.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+    Write-Host "Creating Custom Windows Server 2025 ISO" -ForegroundColor Cyan
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+    Write-Host ""
+    
+    try {
+        # Validate ISO path
+        if ($null -eq $script:effectiveIsoPath -or [string]::IsNullOrWhiteSpace($script:effectiveIsoPath)) {
+            throw "Original ISO path is required for creating a custom ISO. Please specify -IsoPath with the original Windows Server $WindowsVersion ISO."
+        }
+
+        Test-IsoFile -Path $script:effectiveIsoPath
+        
+        # Get project paths
+        $projectRoot = Split-Path $PSScriptRoot -Parent
+        $packerDir = Join-Path $projectRoot "packer"
+        
+        # Use E: drive for storage (E: has the most available space)
+        $packerStorageDir = "E:\packer"
+        
+        # Get version-specific paths
+        $versionPaths = Get-VersionSpecificPaths -WindowsVersion $WindowsVersion -PackerDir $packerDir
+        
+        # Ensure storage directory exists
+        if (-not (Test-Path $packerStorageDir)) {
+            Write-Host "Creating directory: $packerStorageDir" -ForegroundColor Yellow
+            $null = New-Item -ItemType Directory -Path $packerStorageDir -Force
+        }
+        
+        # Prepare file paths - configs from project, outputs to E: drive
+        $unattendXmlPath = $versionPaths.AutoUnattend
+        $customIsoPath = Join-Path $packerStorageDir $versionPaths.CustomIsoName
+        
+        # Validate required files exist
+        if (-not (Test-Path $unattendXmlPath)) {
+            throw "Required file not found: $unattendXmlPath"
+        }
+        
+        # Check if custom ISO already exists
+        if (Test-Path $customIsoPath) {
+            Write-Host "Existing custom ISO found: $customIsoPath" -ForegroundColor Yellow
+            $response = Read-Host "Do you want to recreate it? (y/N)"
+            if ($response -notmatch '^[Yy]') {
+                Write-Host "Using existing custom ISO." -ForegroundColor Green
+                return $customIsoPath
+            }
+            
+            Write-Host "Removing existing custom ISO..." -ForegroundColor Yellow
+            Remove-Item $customIsoPath -Force
+        }
+        
+        # Create custom ISO with autounattend.xml
+        Write-Host "Creating custom Windows ISO from: $script:effectiveIsoPath" -ForegroundColor Green
+        Write-Host "Output location: $customIsoPath" -ForegroundColor Green
+        Write-Host ""
+        
+        New-CustomIso -SourceIsoPath $script:effectiveIsoPath -OutputIsoPath $customIsoPath -UnattendXmlPath $unattendXmlPath
+        
+        # Verify the result
+        if (Test-Path $customIsoPath) {
+            $isoSize = (Get-Item $customIsoPath).Length
+            $isoSizeMB = [math]::Round($isoSize / 1MB, 2)
+            
+            Write-Host ""
+            Write-Host ("=" * 70) -ForegroundColor Green
+            Write-Host "Custom ISO Creation Complete!" -ForegroundColor Green
+            Write-Host ("=" * 70) -ForegroundColor Green
+            Write-Host ""
+            Write-Host "ISO Details:" -ForegroundColor Yellow
+            Write-Host "  Location: $customIsoPath" -ForegroundColor White
+            Write-Host "  Size: $isoSizeMB MB" -ForegroundColor White
+            Write-Host "  Created: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor White
+            Write-Host ""
+            Write-Host "This ISO contains:" -ForegroundColor Yellow
+            Write-Host "  • Windows Server 2025" -ForegroundColor White
+            Write-Host "  • Embedded autounattend.xml for automated installation" -ForegroundColor White
+            Write-Host "  • Packer automation scripts" -ForegroundColor White
+            Write-Host ""
+            Write-Host "The ISO is ready for use with Packer or manual VM installation." -ForegroundColor Green
+            
+            return $customIsoPath
+        }
+        else {
+            throw "Custom ISO was not created successfully"
+        }
+    }
+    catch {
+        Write-Host ("=" * 70) -ForegroundColor Red
+        Write-Host "Custom ISO Creation Failed!" -ForegroundColor Red
+        Write-Host ("=" * 70) -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+        throw
+    }
+}
+
+function Get-WindowsImageInfo {
+    <#
+    .SYNOPSIS
+        Gets information about Windows images in an ISO file
+    
+    .DESCRIPTION
+        This function mounts an ISO and extracts information about the available
+        Windows installation images, which helps determine the correct image index
+        to use in autounattend.xml
+    
+    .PARAMETER IsoPath
+        Path to the Windows ISO file
+    
+    .EXAMPLE
+        Get-WindowsImageInfo -IsoPath "F:\Install\Microsoft\Windows Server\WinServer_2025.iso"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateScript({ Test-Path $_ -PathType Leaf })]
+        [string]$IsoPath
+    )
+    
+    try {
+        Write-Host "Analyzing Windows images in ISO: $IsoPath" -ForegroundColor Yellow
+        
+        # Mount the ISO
+        $mount = Mount-DiskImage -ImagePath $IsoPath -PassThru -ErrorAction Stop
+        $driveLetter = ($mount | Get-Volume).DriveLetter + ":"
+        
+        # Check for install.wim
+        $wimPath = "$driveLetter\sources\install.wim"
+        if (Test-Path $wimPath) {
+            Write-Host "Found install.wim, getting image information..." -ForegroundColor Green
+            
+            # Get WIM image information using DISM
+            $wimInfo = & dism /Get-WimInfo /WimFile:$wimPath
+            
+            # Parse and display the information
+            $images = @()
+            $currentImage = @{
+                Index = $null
+                Name = $null
+                Description = $null
+                Size = $null
+            }
+            
+            foreach ($line in $wimInfo) {
+                if ($line -match "Index : (\d+)") {
+                    if ($currentImage.Index -ne $null) {
+                        $images += [PSCustomObject]$currentImage
+                    }
+                    $currentImage = [ordered]@{ Index = [int]$matches[1] }
+                }
+                elseif ($line -match "Name : (.+)") {
+                    $currentImage.Name = $matches[1].Trim()
+                }
+                elseif ($line -match "Description : (.+)") {
+                    $currentImage.Description = $matches[1].Trim()
+                }
+                elseif ($line -match "Size : (.+)") {
+                    $currentImage.Size = $matches[1].Trim()
+                }
+            }
+            
+        # Add the last image
+        if ($currentImage.Index -ne $null) {
+            $images += [PSCustomObject]$currentImage
+        }
+        
+        # Display results
+        Write-Host "`nAvailable Windows Images:" -ForegroundColor Yellow
+        Write-Host ("=" * 80) -ForegroundColor Gray
+        $images | Format-Table -AutoSize
+        
+        # Provide recommendations
+        Write-Host "`nRecommended image indices for autounattend.xml:" -ForegroundColor Yellow
+        $standardImages = $images | Where-Object { $_.Name -match "Datacenter" -and $_.Name -match "(Desktop Experience)" }
+        $coreImages = $images | Where-Object { $_.Name -match "Datacenter" -and $_.Name -notmatch "(Desktop Experience)" }
+        
+        if ($standardImages) {
+            Write-Host "For Datacenter Edition (Desktop Experience): Index $($standardImages[0].Index)" -ForegroundColor Green
+        }
+        if ($coreImages) {
+            Write-Host "For Core Edition (no GUI): Index $($coreImages[0].Index)" -ForegroundColor Green
+        }
+        
+        return $images
+        }
+        else {
+            Write-Warning "install.wim not found in ISO sources directory"
+            return $null
+        }
+    }
+    catch {
+        Write-Error "Failed to analyze ISO: $($_.Exception.Message)"
+        return $null
+    }
+    finally {
+        if ($mount) {
+            Dismount-DiskImage -ImagePath $IsoPath -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+}
+#endregion
+
+#region Helper Functions for Version Support
+function Get-VersionSpecificPaths {
+    <#
+    .SYNOPSIS
+        Gets version-specific file paths for different Windows Server versions
+    
+    .PARAMETER WindowsVersion
+        The Windows Server version (2019 or 2025)
+    
+    .PARAMETER PackerDir
+        The base packer directory containing configuration files
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('2019', '2025')]
+        [string]$WindowsVersion,
+        
+        [Parameter(Mandatory)]
+        [string]$PackerDir
+    )
+    
+    $versionPaths = @{
+        '2019' = @{
+            PackerConfig = Join-Path $PackerDir "windows-server-2019.pkr.hcl"
+            AutoUnattend = Join-Path $PackerDir "autounattend-2019.xml"
+            CustomIsoName = "custom_windows_server_2019.iso"
+            BoxName = "windows-server-2019-golden"
+            OutputDir = "E:\packer\output-hyperv-iso-2019"
+        }
+        '2025' = @{
+            PackerConfig = Join-Path $PackerDir "windows-server-2025.pkr.hcl"
+            AutoUnattend = Join-Path $PackerDir "autounattend-2025.xml"
+            CustomIsoName = "custom_windows_server_2025.iso"
+            BoxName = "windows-server-2025-golden"
+            OutputDir = "E:\packer\output-hyperv-iso"
+        }
+    }
+    
+    return $versionPaths[$WindowsVersion]
+}
+
 #endregion
 
 #region Main Execution
 try {
     # Initialize configuration and logging
     Initialize-WorkflowConfiguration -ConfigPath $ConfigPath
-    Initialize-WorkflowLogging -ScriptName "Build-WeeklyGoldenImage"
+    Initialize-WorkflowLogging -ScriptName "Build-GoldenImage"
     
     $config = Get-WorkflowConfig
     
-    # Set effective parameters from config or parameters
-    $script:effectiveBoxName = if ($BoxName) { $BoxName } else { $config.golden_image.box_name }
+    # Set effective parameters - use version-specific box name unless explicitly overridden
+    $versionPaths = Get-VersionSpecificPaths -WindowsVersion $WindowsVersion -PackerDir (Join-Path $PSScriptRoot "..\packer")
+    $script:effectiveBoxName = if ($BoxName) { $BoxName } else { $versionPaths.BoxName }
     $script:effectiveDaysBeforeRebuild = if ($DaysBeforeRebuild) { $DaysBeforeRebuild } else { $config.golden_image.rebuild_interval_days }
     
-    # Find ISO path
+    # Find ISO path - check for existing custom ISO first
+    $packerStorageDir = "E:\packer"
+    $existingCustomIsoPath = Join-Path $packerStorageDir $versionPaths.CustomIsoName
+    
     if ($PSBoundParameters.ContainsKey('IsoPath')) {
+        # User provided ISO path - validate and use it
         if ($null -eq $IsoPath -or $IsoPath -isnot [string] -or [string]::IsNullOrWhiteSpace($IsoPath)) {
             throw "You must provide a valid string path for -IsoPath. Example: -IsoPath 'F:\\Install\\Microsoft\\Windows Server\\WinServer_2025.iso'"
         }
         $script:effectiveIsoPath = ConvertTo-AbsolutePath -Path $IsoPath
+        Write-Information "Using provided ISO path: $($script:effectiveIsoPath)" -InformationAction Continue
+    }
+    elseif (Test-Path $existingCustomIsoPath) {
+        # Custom ISO already exists for this version - use it directly
+        $script:effectiveIsoPath = $null  # Not needed since we'll use custom ISO
+        Write-Information "Found existing custom ISO for Windows Server $WindowsVersion - no original ISO needed" -InformationAction Continue
+        Write-Information "Custom ISO: $existingCustomIsoPath" -InformationAction Continue
     }
     else {
+        # No custom ISO exists and no ISO provided - try to find one or fail
+        Write-Information "No custom ISO found for Windows Server $WindowsVersion, searching for original ISO..." -InformationAction Continue
         $foundIso = Find-WindowsServerIso
         if ($foundIso -is [string] -and -not [string]::IsNullOrWhiteSpace($foundIso)) {
             $script:effectiveIsoPath = $foundIso
+            Write-Information "Auto-detected ISO: $($script:effectiveIsoPath)" -InformationAction Continue
         }
         elseif ($foundIso -is [array]) {
             # Defensive: If Find-WindowsServerIso ever returns an array, pick the first valid string
             $firstString = $foundIso | Where-Object { $_ -is [string] -and -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1
             if ($firstString) {
                 $script:effectiveIsoPath = $firstString
+                Write-Information "Auto-detected ISO: $($script:effectiveIsoPath)" -InformationAction Continue
             }
             else {
-                throw "Windows Server ISO not found. Please specify -IsoPath or place ISO in one of the default locations."
+                throw "No custom ISO found for Windows Server $WindowsVersion and no original ISO available. Please either:`n1. Specify -IsoPath with the original Windows Server $WindowsVersion ISO`n2. Or place the original ISO in a default location"
             }
         }
         else {
-            throw "Windows Server ISO not found. Please specify -IsoPath or place ISO in one of the default locations."
+            throw "No custom ISO found for Windows Server $WindowsVersion and no original ISO available. Please either:`n1. Specify -IsoPath with the original Windows Server $WindowsVersion ISO`n2. Or place the original ISO in a default location"
         }
     }
     
@@ -1137,12 +1576,28 @@ try {
         'Check' {
             Invoke-BuildCheck
         }
+        'CreateIso' {
+            Invoke-CustomIsoCreation
+            exit 0
+        }
+        'CheckImages' {
+            Write-Host "Checking Windows image indexes in ISO..." -ForegroundColor Yellow
+            $images = Get-WindowsImageInfo -IsoPath $IsoPath
+            if ($images) {
+                Write-Host "`nImage check completed successfully." -ForegroundColor Green
+                exit 0
+            } else {
+                Write-Host "`nImage check failed." -ForegroundColor Red
+                exit 1
+            }
+        }
         'Build' {
             if ($Interactive) {
                 $action = Show-InteractiveMenu
                 switch ($action) {
                     "build" { Invoke-GoldenImageBuild }
                     "check" { Invoke-BuildCheck }
+                    "createiso" { Invoke-CustomIsoCreation }
                     "schedule" { New-WeeklyScheduledTask }
                     "quit" { 
                         Write-Host "Exiting..." -ForegroundColor Yellow
