@@ -116,10 +116,8 @@ function Expand-ConfigurationPaths {
     param()
     
     # Expand paths in packer configuration
-    if ($script:Config.packer.oscdimg_paths) {
-        for ($i = 0; $i -lt $script:Config.packer.oscdimg_paths.Length; $i++) {
-            $script:Config.packer.oscdimg_paths[$i] = [Environment]::ExpandEnvironmentVariables($script:Config.packer.oscdimg_paths[$i])
-        }
+    if ($script:Config.packer.oscdimg_path) {
+        $script:Config.packer.oscdimg_path = [Environment]::ExpandEnvironmentVariables($script:Config.packer.oscdimg_path)
     }
     
     # Expand other paths as needed
@@ -367,7 +365,7 @@ function Find-OscdimgPath {
     param()
     
     $config = Get-WorkflowConfig
-    $oscdimgPaths = $config.packer.oscdimg_paths
+    $oscdimgPaths = $config.packer.oscdimg_path
     
     foreach ($path in $oscdimgPaths) {
         if (Test-Path $path) {
@@ -397,8 +395,8 @@ function Test-HyperVEnvironment {
     Write-WorkflowProgress -Activity "Validating Environment" -Status "Checking Hyper-V..."
     
     # Check if Hyper-V is enabled
-    $hyperVFeature = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue
-    if (-not $hyperVFeature -or $hyperVFeature.State -ne 'Enabled') {
+    $hyperVFeature = (Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V | Where-Object { $_.State -eq 'Enabled' })
+    if (-not $hyperVFeature) {
         throw "Hyper-V is not enabled. Please enable Hyper-V before continuing."
     }
     
@@ -472,10 +470,10 @@ function Find-WindowsServerIso {
     #>
     [CmdletBinding()]
     param()
-    
+
     $config = Get-WorkflowConfig
     $isoPaths = $config.packer.default_iso_paths
-    
+
     foreach ($path in $isoPaths) {
         if (Test-Path $path) {
             try {
@@ -488,7 +486,6 @@ function Find-WindowsServerIso {
             }
         }
     }
-    
     return $null
 }
 #endregion
@@ -607,20 +604,22 @@ function Test-IsElevated {
 
 #region Export Functions
 # Export functions that should be available to other modules
-Export-ModuleMember -Function @(
-    'Initialize-WorkflowConfiguration',
-    'Get-WorkflowConfig',
-    'Initialize-WorkflowLogging',
-    'Stop-WorkflowLogging',
-    'Write-WorkflowProgress',
-    'Test-Prerequisites',
-    'Test-HyperVEnvironment',
-    'Test-IsoFile',
-    'Find-WindowsServerIso',
-    'Find-OscdimgPath',
-    'Invoke-WithRetry',
-    'Get-SafeVMName',
-    'ConvertTo-AbsolutePath',
-    'Test-IsElevated'
-)
+if ($MyInvocation.MyCommand.Module) {
+    Export-ModuleMember -Function @(
+        'Initialize-WorkflowConfiguration',
+        'Get-WorkflowConfig',
+        'Initialize-WorkflowLogging',
+        'Stop-WorkflowLogging',
+        'Write-WorkflowProgress',
+        'Test-Prerequisites',
+        'Test-HyperVEnvironment',
+        'Test-IsoFile',
+        'Find-WindowsServerIso',
+        'Find-OscdimgPath',
+        'Invoke-WithRetry',
+        'Get-SafeVMName',
+        'ConvertTo-AbsolutePath',
+        'Test-IsElevated'
+    )
+}
 #endregion

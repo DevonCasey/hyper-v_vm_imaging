@@ -45,9 +45,9 @@ param(
 
 #region Module Imports
 # Import core functions if available
-$coreModulePath = Join-Path $PSScriptRoot "core\Common.ps1"
+$coreModulePath = Join-Path $PSScriptRoot "core\Common.psm1"
 if (Test-Path $coreModulePath) {
-    . $coreModulePath
+    Import-Module $coreModulePath
     $useEnhancedLogging = $true
 }
 else {
@@ -85,9 +85,9 @@ function Show-WelcomeScreen {
     param()
     
     Clear-Host
-    Write-Host "=" * 80 -ForegroundColor Green
+    Write-Host ("=" * 80) -ForegroundColor Green
     Write-Host "   Hyper-V VM Imaging Workflow Setup v2.0" -ForegroundColor Green
-    Write-Host "=" * 80 -ForegroundColor Green
+    Write-Host ("=" * 80) -ForegroundColor Green
     Write-Host ""
     Write-Host "This script will configure your system for building Windows Server VMs using:" -ForegroundColor White
     Write-Host "  • HashiCorp Packer (for VM image creation)" -ForegroundColor Gray
@@ -126,9 +126,9 @@ function Show-SetupMenu {
     
     do {
         Clear-Host
-        Write-Host "=" * 80 -ForegroundColor Cyan
+        Write-Host ("=" * 80) -ForegroundColor Cyan
         Write-Host "   Setup Options" -ForegroundColor Cyan
-        Write-Host "=" * 80 -ForegroundColor Cyan
+        Write-Host ("=" * 80) -ForegroundColor Cyan
         Write-Host ""
         
         Write-Host "Setup Tasks:" -ForegroundColor Yellow
@@ -176,7 +176,7 @@ function Test-SetupPrerequisites {
     [CmdletBinding()]
     param()
     
-    Write-Host "`n" + ("=" * 60) -ForegroundColor Yellow
+    Write-Host ("=" * 60) -ForegroundColor Yellow
     Write-Host "Checking Prerequisites..." -ForegroundColor Yellow
     Write-Host ("=" * 60) -ForegroundColor Yellow
     
@@ -190,31 +190,31 @@ function Test-SetupPrerequisites {
     else {
         Write-Host "✓ Running as Administrator" -ForegroundColor Green
     }
-    
+
     # Check Windows version
     Write-WorkflowProgress -Activity "Prerequisites Check" -Status "Checking Windows version..." -PercentComplete 20
     $os = Get-CimInstance Win32_OperatingSystem
     $version = [Version]$os.Version
-    
+
     if ($version.Major -lt 10) {
         $issues += "Windows 10 or Windows Server 2016+ required"
     }
     else {
         Write-Host "✓ Windows version supported ($($os.Caption))" -ForegroundColor Green
     }
-    
+
     # Check available memory
     Write-WorkflowProgress -Activity "Prerequisites Check" -Status "Checking system resources..." -PercentComplete 30
     $computer = Get-CimInstance Win32_ComputerSystem
     $memoryGB = [math]::Round($computer.TotalPhysicalMemory / 1GB, 1)
-    
+
     if ($memoryGB -lt 8) {
-        $issues += "At least 8GB RAM recommended (found: ${memoryGB}GB)"
+        $issues += "At least 8GB RAM recommended (found: $memoryGB GB)"
     }
     else {
-        Write-Host "✓ Sufficient memory available (${memoryGB}GB)" -ForegroundColor Green
+        Write-Host ("✓ Sufficient memory available ({0} GB)" -f $memoryGB) -ForegroundColor Green
     }
-    
+
     # Check Hyper-V compatibility
     Write-WorkflowProgress -Activity "Prerequisites Check" -Status "Checking Hyper-V compatibility..." -PercentComplete 40
     try {
@@ -229,19 +229,19 @@ function Test-SetupPrerequisites {
     catch {
         Write-Warning "Could not check Hyper-V compatibility"
     }
-    
+
     # Check disk space
     Write-WorkflowProgress -Activity "Prerequisites Check" -Status "Checking disk space..." -PercentComplete 50
-    $systemDrive = Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='C:'"
+    $systemDrive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='C:'"
     $freeSpaceGB = [math]::Round($systemDrive.FreeSpace / 1GB, 1)
-    
+
     if ($freeSpaceGB -lt 50) {
-        $issues += "At least 50GB free disk space recommended (found: ${freeSpaceGB}GB)"
+        $issues += "At least 50GB free disk space recommended (found: $freeSpaceGB GB)"
     }
     else {
-        Write-Host "✓ Sufficient disk space available (${freeSpaceGB}GB free)" -ForegroundColor Green
+        Write-Host ("✓ Sufficient disk space available ({0} GB free)" -f $freeSpaceGB) -ForegroundColor Green
     }
-    
+
     # Check internet connectivity
     Write-WorkflowProgress -Activity "Prerequisites Check" -Status "Checking internet connectivity..." -PercentComplete 60
     try {
@@ -256,18 +256,18 @@ function Test-SetupPrerequisites {
     catch {
         $issues += "Internet connectivity required for downloads"
     }
-    
+
     Write-Progress -Activity "Prerequisites Check" -Completed
-    
+
     # Display results
     if ($issues.Count -eq 0) {
         Write-Host "`n✓ All prerequisites met!" -ForegroundColor Green
         return $true
     }
     else {
-        Write-Host "`n⚠ Issues found:" -ForegroundColor Red
-        $issues | ForEach-Object { Write-Host "  • $_" -ForegroundColor Red }
-        
+        Write-Host "`n✗ Issues found:" -ForegroundColor Red
+        $issues | ForEach-Object { Write-Host "  ✗ $_" -ForegroundColor Red }
+
         if ($Interactive) {
             $continue = Read-Host "`nContinue anyway? (y/N)"
             return ($continue -eq 'y' -or $continue -eq 'Y')
@@ -395,7 +395,7 @@ function Install-HashiCorpTools {
             
             if ($LASTEXITCODE -eq 0) {
                 # Refresh PATH and verify
-                $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+                $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
                 $version = Invoke-Expression $tool.Command 2>$null
                 Write-Host "✓ $($tool.Name) installed successfully: $version" -ForegroundColor Green
             }
@@ -686,7 +686,7 @@ function Test-HyperVAdministrators {
 #endregion
 
 #region Networking Configuration Functions
-function Configure-HyperVNetworking {
+function Set-HyperVNetworking {
     <#
     .SYNOPSIS
         Configures Hyper-V networking with enhanced options
@@ -704,11 +704,11 @@ function Configure-HyperVNetworking {
     $existingSwitch = Get-VMSwitch -Name $switchName -ErrorAction SilentlyContinue
     if ($existingSwitch) {
         Write-Host "✓ Virtual switch '$switchName' already exists ($($existingSwitch.SwitchType))" -ForegroundColor Green
-        
+
         if ($existingSwitch.NetAdapterInterfaceDescription) {
             Write-Host "  Attached to: $($existingSwitch.NetAdapterInterfaceDescription)" -ForegroundColor Gray
         }
-        
+
         if (-not $Force) {
             return
         }
@@ -997,7 +997,7 @@ function Test-InstallationComplete {
             break
         }
     }
-    
+
     if (-not $oscdimgFound) {
         Write-Host "✗ Windows ADK (oscdimg): Not found" -ForegroundColor Red
         $allGood = $false
@@ -1055,7 +1055,7 @@ function Invoke-CompleteSetup {
         
         # Configure networking if requested
         if ($ConfigureNetworking -or $Interactive) {
-            Configure-HyperVNetworking
+            Set-HyperVNetworking
         }
         
         # Final validation
@@ -1184,7 +1184,7 @@ try {
     
 }
 catch {
-    Write-Error "Setup failed: $($_.Exception.Message)"
+    Write-Error ("Setup failed: {0}" -f $_.Exception.Message)
     exit 1
 }
 finally {

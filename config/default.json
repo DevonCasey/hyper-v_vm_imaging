@@ -23,9 +23,8 @@
       "default_iso_paths": [
         "F:\\Install\\Microsoft\\Windows Server\\WinServer_2025.iso"
       ],
-      "oscdimg_paths": [
-        "${env:ProgramFiles(x86)}\\Windows Kits\\10\\Assessment and Deployment Kit\\Deployment Tools\\amd64\\Oscdimg\\oscdimg.exe",
-        "${env:ProgramFiles}\\Windows Kits\\10\\Assessment and Deployment Kit\\Deployment Tools\\amd64\\Oscdimg\\oscdimg.exe"
+      "oscdimg_path": [ 
+        "C:\\Program Files (x86)\\Windows Kits\\10\\Assessment and Deployment Kit\\Deployment Tools\\amd64\\Oscdimg\\oscdimg.exe"
       ],
       "build_settings": {
         "cpus": 4,

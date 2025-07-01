@@ -73,10 +73,9 @@ source "hyperv-iso" "windows-server-2025" {
   guest_additions_mode              = "disable"
   
   # Boot settings - autounattend.xml is embedded in custom ISO
-  boot_wait = "30s"
+  boot_wait = "2s"
   boot_command = [
-    "<spacebar><wait5s>",
-    "<enter><wait15s>"
+    "<spacebar><wait1s><spacebar><wait1s><spacebar>"
   ]
   
   # Communication settings

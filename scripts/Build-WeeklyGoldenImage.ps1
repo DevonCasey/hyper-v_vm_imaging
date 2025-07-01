@@ -92,9 +92,9 @@ param(
 
 #region Module Imports
 # Import core functions
-$coreModulePath = Join-Path $PSScriptRoot "core\Common.ps1"
+$coreModulePath = Join-Path $PSScriptRoot "core\Common.psm1"
 if (Test-Path $coreModulePath) {
-    . $coreModulePath
+    Import-Module $coreModulePath
 }
 else {
     throw "Core module not found: $coreModulePath. Please ensure the project structure is intact."
@@ -287,7 +287,11 @@ function Show-SystemInformation {
         $tools = @(
             @{ Name = "Packer"; Command = "packer version" },
             @{ Name = "Vagrant"; Command = "vagrant --version" },
-            @{ Name = "Hyper-V"; Test = { Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All | Where-Object State -eq 'Enabled' } }
+            @{ Name = "Hyper-V"; Test = {
+                    $feature = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All
+                    $feature.State -eq 'Enabled'
+                } 
+            }
         )
         
         foreach ($tool in $tools) {
@@ -427,8 +431,15 @@ function Reset-ToDefaults {
     
     # Try to find ISO
     $foundIso = Find-WindowsServerIso
-    if ($foundIso) {
+    if ($foundIso -is [string] -and -not [string]::IsNullOrWhiteSpace($foundIso)) {
         $script:effectiveIsoPath = $foundIso
+    }
+    elseif ($foundIso -is [array]) {
+        # God damn Find-WindowsServerIso. If it ever returns an array, pick the first valid string
+        $firstString = $foundIso | Where-Object { $_ -is [string] -and -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1
+        if ($firstString) {
+            $script:effectiveIsoPath = $firstString
+        }
     }
 }
 
@@ -764,8 +775,8 @@ function Invoke-GoldenImageBuild {
     param()
     
     try {
-        Write-Host "`n" + ("=" * 70) -ForegroundColor Green
-        Write-Host "   Starting Golden Image Build Process" -ForegroundColor Green
+        Write-Host ("=" * 70) -ForegroundColor Green
+        Write-Host "Starting Golden Image Build Process" -ForegroundColor Green
         Write-Host ("=" * 70) -ForegroundColor Green
         Write-Host ""
         
@@ -785,6 +796,10 @@ function Invoke-GoldenImageBuild {
         
         # Validate ISO
         Write-WorkflowProgress -Activity "Golden Image Build" -Status "Validating ISO file..." -PercentComplete 10
+        if ([string]::IsNullOrWhiteSpace($script:effectiveIsoPath) -or -not (Test-Path $script:effectiveIsoPath)) {
+            throw "effectiveIsoPath is not a valid string path: $($script:effectiveIsoPath)"
+        }
+
         Test-IsoFile -Path $script:effectiveIsoPath
         
         # Check if rebuild is needed
@@ -801,7 +816,7 @@ function Invoke-GoldenImageBuild {
         
         # Get project paths
         $config = Get-WorkflowConfig
-        $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+        $projectRoot = Split-Path $PSScriptRoot -Parent
         $packerDir = Join-Path $projectRoot "packer"
         $boxesDir = Join-Path $projectRoot $config.global.boxes_directory
         
@@ -865,8 +880,8 @@ function Invoke-GoldenImageBuild {
         $totalDuration = (Get-Date) - $buildStartTime
         $nextBuildDate = (Get-Date).AddDays($script:effectiveDaysBeforeRebuild)
         
-        Write-Host "`n" + ("=" * 70) -ForegroundColor Green
-        Write-Host "   Golden Image Build Complete!" -ForegroundColor Green
+        Write-Host ("=" * 70) -ForegroundColor Green
+        Write-Host "Golden Image Build Complete!" -ForegroundColor Green
         Write-Host ("=" * 70) -ForegroundColor Green
         Write-Host ""
         Write-Host "Build Summary:" -ForegroundColor Yellow
@@ -882,8 +897,8 @@ function Invoke-GoldenImageBuild {
     }
     catch {
         Write-Progress -Activity "Golden Image Build" -Completed
-        Write-Host "`n" + ("=" * 70) -ForegroundColor Red
-        Write-Host "   Golden Image Build Failed!" -ForegroundColor Red
+        Write-Host ("=" * 70) -ForegroundColor Red
+        Write-Host "Golden Image Build Failed!" -ForegroundColor Red
         Write-Host ("=" * 70) -ForegroundColor Red
         Write-Host ""
         Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
@@ -902,7 +917,7 @@ function Show-DeploymentInstructions {
     param()
     
     $config = Get-WorkflowConfig
-    $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+    $projectRoot = Split-Path $PSScriptRoot -Parent
     $vagrantDir = Join-Path $projectRoot "vagrant"
     
     Write-Host "Deployment Instructions:" -ForegroundColor Yellow
@@ -932,7 +947,7 @@ function Show-DeploymentInstructions {
             }
         }
         else {
-            Write-Host "✓ No running VMs detected - all future VMs will use the new golden image" -ForegroundColor Green
+            Write-Host "[OK] No running VMs detected - all future VMs will use the new golden image" -ForegroundColor Green
         }
     }
     catch {
@@ -951,7 +966,7 @@ function Get-RunningVagrantVMs {
     )
     
     if (-not $VagrantBaseDir) {
-        $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+        $projectRoot = Split-Path $PSScriptRoot -Parent
         $VagrantBaseDir = Join-Path $projectRoot "vagrant"
     }
     
@@ -1056,7 +1071,7 @@ function New-WeeklyScheduledTask {
         
         $null = Register-ScheduledTask -TaskName $taskName -Description $taskDescription -Action $action -Trigger $trigger -Settings $settings -Principal $principal
         
-        Write-Host "✓ Scheduled task '$taskName' created successfully" -ForegroundColor Green
+        Write-Host "[OK] Scheduled task '$taskName' created successfully" -ForegroundColor Green
         Write-Host "Task will run every $triggerDay at $triggerTime" -ForegroundColor White
         
         # Show task information
@@ -1086,13 +1101,26 @@ try {
     $script:effectiveDaysBeforeRebuild = if ($DaysBeforeRebuild) { $DaysBeforeRebuild } else { $config.golden_image.rebuild_interval_days }
     
     # Find ISO path
-    if ($IsoPath) {
+    if ($PSBoundParameters.ContainsKey('IsoPath')) {
+        if ($null -eq $IsoPath -or $IsoPath -isnot [string] -or [string]::IsNullOrWhiteSpace($IsoPath)) {
+            throw "You must provide a valid string path for -IsoPath. Example: -IsoPath 'F:\\Install\\Microsoft\\Windows Server\\WinServer_2025.iso'"
+        }
         $script:effectiveIsoPath = ConvertTo-AbsolutePath -Path $IsoPath
     }
     else {
         $foundIso = Find-WindowsServerIso
-        if ($foundIso) {
+        if ($foundIso -is [string] -and -not [string]::IsNullOrWhiteSpace($foundIso)) {
             $script:effectiveIsoPath = $foundIso
+        }
+        elseif ($foundIso -is [array]) {
+            # Defensive: If Find-WindowsServerIso ever returns an array, pick the first valid string
+            $firstString = $foundIso | Where-Object { $_ -is [string] -and -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1
+            if ($firstString) {
+                $script:effectiveIsoPath = $firstString
+            }
+            else {
+                throw "Windows Server ISO not found. Please specify -IsoPath or place ISO in one of the default locations."
+            }
         }
         else {
             throw "Windows Server ISO not found. Please specify -IsoPath or place ISO in one of the default locations."
@@ -1132,10 +1160,13 @@ try {
         }
     }
 }
+
 catch {
     Write-Error $_.Exception.Message
     exit 1
 }
+
 finally {
     Stop-WorkflowLogging
 }
+# Endregion
