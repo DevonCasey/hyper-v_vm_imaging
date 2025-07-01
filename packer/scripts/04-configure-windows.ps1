@@ -1,3 +1,19 @@
+<#
+.SYNOPSIS
+    Configure Windows settings for golden image optimization
+
+.DESCRIPTION
+    Applies various Windows configuration changes including UAC settings,
+    Windows Defender configuration, and Windows Update settings to optimize
+    the system for use as a golden image template.
+
+.NOTES
+    Author: Devon Casey
+    Email: me@devoncasey.com
+    GitHub: https://github.com/DevonCasey
+    Created: July 1, 2025
+#>
+
 # Configure Windows Settings
 Write-Host "Configuring Windows settings..." -ForegroundColor Yellow
 

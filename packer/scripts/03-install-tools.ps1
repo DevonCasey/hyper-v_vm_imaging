@@ -1,3 +1,18 @@
+<#
+.SYNOPSIS
+    Install common tools and utilities via Chocolatey
+
+.DESCRIPTION
+    Installs essential tools like Notepad++ and Google Chrome to provide
+    a basic set of utilities in the golden image.
+
+.NOTES
+    Author: Devon Casey
+    Email: me@devoncasey.com
+    GitHub: https://github.com/DevonCasey
+    Created: July 1, 2025
+#>
+
 # Install Common Tools
 Write-Host "Installing common tools..." -ForegroundColor Yellow
 

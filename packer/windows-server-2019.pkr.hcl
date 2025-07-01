@@ -86,18 +86,18 @@ source "hyperv-iso" "windows-server-2019" {
   enable_mac_spoofing              = false
   enable_dynamic_memory            = false
   
-  # Boot settings - Conservative approach for Windows Server 2019
-  boot_wait = "5s"
+  # Boot settings - Give more time for autounattend.xml to complete
+  boot_wait = "10s"
   boot_command = [
-    # Simple approach - just send enter and wait for autounattend.xml to take over
-    "<enter><wait60s>"
+    # Just press enter and wait for autounattend.xml to take over
+    "<enter><wait120s>"
   ]
   
-  # Communication settings
+  # Communication settings - Extended timeouts for Windows 2019
   communicator   = "winrm"
   winrm_username = var.WinRMUsername
   winrm_password = var.WinRMPassword
-  winrm_timeout  = "120m" # Increased timeout for Windows updates and restarts
+  winrm_timeout  = "180m" # Extended timeout for Windows updates and initial setup
   winrm_port     = 5985
   winrm_use_ssl  = false
   winrm_insecure = true
@@ -112,10 +112,16 @@ build {
   name = "windows-server-2019"
   sources = ["source.hyperv-iso.windows-server-2019"]
   
-  # Wait for system to be fully ready
+  # Wait for system to be fully ready and test WinRM connectivity
   provisioner "powershell" {
     inline = [
-      "Write-Host 'Waiting for system to be ready...'",
+      "Write-Host 'Connected via WinRM successfully!' -ForegroundColor Green",
+      "Write-Host 'System Information:' -ForegroundColor Yellow",
+      "Write-Host \"Computer: $env:COMPUTERNAME\"",
+      "Write-Host \"User: $env:USERNAME\"",
+      "Write-Host \"PowerShell Version: $($PSVersionTable.PSVersion)\"",
+      "Write-Host \"WinRM Service Status: $(Get-Service WinRM | Select-Object Status, StartType)\"",
+      "Write-Host 'Waiting additional time for system stability...'",
       "Start-Sleep -Seconds 30"
     ]
   }

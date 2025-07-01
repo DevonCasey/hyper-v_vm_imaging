@@ -1,3 +1,18 @@
+<#
+.SYNOPSIS
+    Install Windows Updates during golden image creation
+
+.DESCRIPTION
+    Installs the latest Windows updates using the PSWindowsUpdate module
+    to ensure the golden image includes current security patches and fixes.
+
+.NOTES
+    Author: Devon Casey
+    Email: me@devoncasey.com
+    GitHub: https://github.com/DevonCasey
+    Created: July 1, 2025
+#>
+
 # Install Windows Updates
 Write-Host "Installing Windows Updates..." -ForegroundColor Yellow
 

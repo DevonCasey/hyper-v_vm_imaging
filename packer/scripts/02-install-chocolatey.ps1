@@ -1,3 +1,18 @@
+<#
+.SYNOPSIS
+    Install Chocolatey package manager for Windows
+
+.DESCRIPTION
+    Installs or upgrades Chocolatey package manager to enable easy software
+    installation during the VM provisioning process.
+
+.NOTES
+    Author: Devon Casey
+    Email: me@devoncasey.com
+    GitHub: https://github.com/DevonCasey
+    Created: July 1, 2025
+#>
+
 # Install Chocolatey Package Manager
 Write-Host "Installing Chocolatey..." -ForegroundColor Yellow
 

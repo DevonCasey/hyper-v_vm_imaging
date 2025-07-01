@@ -1,3 +1,19 @@
+<#
+.SYNOPSIS
+    Final cleanup and preparation for Vagrant packaging
+
+.DESCRIPTION
+    Performs comprehensive cleanup operations including clearing temporary files,
+    event logs, and other artifacts to minimize the size of the final golden image
+    and prepare it for Vagrant box packaging.
+
+.NOTES
+    Author: Devon Casey
+    Email: me@devoncasey.com
+    GitHub: https://github.com/DevonCasey
+    Created: July 1, 2025
+#>
+
 # Final Cleanup and Preparation for Vagrant
 Write-Host "Performing final cleanup..." -ForegroundColor Yellow
 
