@@ -9,7 +9,9 @@
 .NOTES
     Version: 1.0.0
     Author: Devon Casey
-    Date: 2025-06-30
+    Email: me@devoncasey.com
+    GitHub: https://github.com/DevonCasey
+    Created: July 1, 2025
 #>
 
 #region Module Variables

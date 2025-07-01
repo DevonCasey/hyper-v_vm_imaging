@@ -8,6 +8,12 @@
     1. Starting a Packer build
     2. Connecting to the VM console via Hyper-V Manager
     3. Monitoring the build process
+
+.NOTES
+    Author: Devon Casey
+    Email: me@devoncasey.com
+    GitHub: https://github.com/DevonCasey
+    Created: July 1, 2025
 #>
 
 param(

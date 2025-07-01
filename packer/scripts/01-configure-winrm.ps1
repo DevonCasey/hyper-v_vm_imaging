@@ -1,3 +1,18 @@
+<#
+.SYNOPSIS
+    Configure WinRM for Packer communication during VM provisioning
+
+.DESCRIPTION
+    Sets up WinRM service with appropriate authentication and encryption settings
+    to allow Packer to communicate with the VM during the build process.
+
+.NOTES
+    Author: Devon Casey
+    Email: me@devoncasey.com
+    GitHub: https://github.com/DevonCasey
+    Created: July 1, 2025
+#>
+
 # Configure WinRM for Packer
 Write-Host "Configuring WinRM..." -ForegroundColor Yellow
 

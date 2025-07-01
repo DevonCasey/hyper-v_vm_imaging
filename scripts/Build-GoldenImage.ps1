@@ -10,10 +10,10 @@
     Name of the Vagrant box to create (uses config default if not specified)
 
 .PARAMETER IsoPath
-    Path to the original Windows Server ISO file. Optional if a custom ISO for the specified WindowsVersion already exists.
+    Path to the original Windows Server ISO file. If provided, will create a custom ISO even if one already exists for the specified WindowsVersion.
 
 .PARAMETER WindowsVersion
-    Windows Server version to build (2019 or 2025). Default: 2025. Used to locate existing custom ISOs.
+    Windows Server version to build (2019 or 2025). Default: 2025. Used to locate existing custom ISOs or determine which version to auto-detect.
 
 .PARAMETER ConfigPath
     Path to custom configuration file (JSON format)
@@ -36,15 +36,12 @@
 .PARAMETER CreateIsoOnly
     Create only the custom Windows Server 2025 ISO with autounattend.xml and exit
 
-.PARAMETER PatchNoPrompt
-    Apply no-prompt EFI boot file patching to eliminate "press any key" boot prompt
-
 .PARAMETER CheckImageIndexes
     Check and display available Windows image indexes in the specified ISO file and exit
 
 .EXAMPLE
     .\Build-GoldenImage.ps1
-    Build with default settings (auto-detect ISO, use config defaults)
+    Build with default settings (use existing custom ISO for 2025 if available, otherwise auto-detect original ISO)
 
 .EXAMPLE
     .\Build-GoldenImage.ps1 -Force -Interactive
@@ -52,7 +49,7 @@
 
 .EXAMPLE
     .\Build-GoldenImage.ps1 -CreateIsoOnly -IsoPath "C:\ISOs\WinServer_2025.iso"
-    Create only the custom ISO with autounattend.xml
+    Create only the custom ISO with autounattend.xml from the specified original ISO
 
 .EXAMPLE
     .\Build-GoldenImage.ps1 -CheckImageIndexes -IsoPath "C:\ISOs\WinServer_2025.iso"
@@ -60,11 +57,11 @@
 
 .EXAMPLE
     .\Build-GoldenImage.ps1 -WindowsVersion 2019
-    Build Windows Server 2019 using existing custom ISO (if available) or auto-detect original ISO
+    Build Windows Server 2019 (use existing custom ISO if available, otherwise auto-detect original ISO)
 
 .EXAMPLE
     .\Build-GoldenImage.ps1 -WindowsVersion 2019 -IsoPath "F:\Install\Microsoft\Windows Server\WinServer_2019.iso"
-    Build Windows Server 2019 golden image with specific original ISO
+    Build Windows Server 2019 and create custom ISO from the specified original ISO (even if custom ISO already exists)
 
 .EXAMPLE
     .\Build-GoldenImage.ps1 -CreateIsoOnly -WindowsVersion 2019 -IsoPath "F:\Install\Microsoft\Windows Server\WinServer_2019.iso"
@@ -80,6 +77,10 @@
 
 .NOTES
     Version: 2.0.0
+    Author: Devon Casey
+    Email: me@devoncasey.com
+    GitHub: https://github.com/DevonCasey
+    Created: July 1, 2025
     Requires: PowerShell 5.1+, Packer, Vagrant, Hyper-V, Windows ADK
 #>
 
@@ -155,6 +156,7 @@ else {
 $script:effectiveBoxName = $null
 $script:effectiveIsoPath = $null
 $script:effectiveDaysBeforeRebuild = $null
+$script:createCustomIso = $false
 #endregion
 
 #region Interactive Functions
@@ -965,7 +967,6 @@ function Invoke-GoldenImageBuild {
         }
         
         # Get project paths
-        $config = Get-WorkflowConfig
         $projectRoot = Split-Path $PSScriptRoot -Parent
         $packerDir = Join-Path $projectRoot "packer"
         
@@ -996,9 +997,9 @@ function Invoke-GoldenImageBuild {
             }
         }
         
-        # Check if custom ISO already exists, if not create it
-        if (-not (Test-Path $customIsoPath)) {
-            # Custom ISO doesn't exist - need to create it
+        # Check if custom ISO already exists or needs to be created
+        if ($script:createCustomIso -or -not (Test-Path $customIsoPath)) {
+            # Custom ISO doesn't exist or needs to be recreated - create it
             if ($null -eq $script:effectiveIsoPath) {
                 throw "Custom ISO not found and no original ISO available to create it. Please provide -IsoPath with the original Windows Server $WindowsVersion ISO."
             }
@@ -1256,17 +1257,18 @@ function New-WeeklyScheduledTask {
 function Invoke-CustomIsoCreation {
     <#
     .SYNOPSIS
-        Creates a custom Windows Server 2025 ISO with autounattend.xml as a standalone operation
+        Creates a custom Windows Server ISO with autounattend.xml as a standalone operation
     
     .DESCRIPTION
         This function creates a custom bootable ISO with embedded autounattend.xml that can be preserved
         between script runs. The ISO is created in the packer directory and will not be automatically cleaned up.
+        Supports Windows Server 2019 and 2025.
     #>
     [CmdletBinding()]
     param()
     
     Write-Host ("=" * 70) -ForegroundColor Cyan
-    Write-Host "Creating Custom Windows Server 2025 ISO" -ForegroundColor Cyan
+    Write-Host "Creating Custom Windows Server $WindowsVersion ISO" -ForegroundColor Cyan
     Write-Host ("=" * 70) -ForegroundColor Cyan
     Write-Host ""
     
@@ -1410,7 +1412,7 @@ function Get-WindowsImageInfo {
             
             foreach ($line in $wimInfo) {
                 if ($line -match "Index : (\d+)") {
-                    if ($currentImage.Index -ne $null) {
+                    if ($null -ne $currentImage.Index) {
                         $images += [PSCustomObject]$currentImage
                     }
                     $currentImage = [ordered]@{ Index = [int]$matches[1] }
@@ -1427,7 +1429,7 @@ function Get-WindowsImageInfo {
             }
             
         # Add the last image
-        if ($currentImage.Index -ne $null) {
+        if ($null -ne $currentImage.Index) {
             $images += [PSCustomObject]$currentImage
         }
         
@@ -1529,33 +1531,39 @@ try {
     $existingCustomIsoPath = Join-Path $packerStorageDir $versionPaths.CustomIsoName
     
     if ($PSBoundParameters.ContainsKey('IsoPath')) {
-        # User provided ISO path - validate and use it
+        # User provided ISO path - validate and use it to create custom ISO
         if ($null -eq $IsoPath -or $IsoPath -isnot [string] -or [string]::IsNullOrWhiteSpace($IsoPath)) {
             throw "You must provide a valid string path for -IsoPath. Example: -IsoPath 'F:\\Install\\Microsoft\\Windows Server\\WinServer_2025.iso'"
         }
         $script:effectiveIsoPath = ConvertTo-AbsolutePath -Path $IsoPath
-        Write-Information "Using provided ISO path: $($script:effectiveIsoPath)" -InformationAction Continue
+        Write-Information "Using provided ISO path to create custom ISO: $($script:effectiveIsoPath)" -InformationAction Continue
+        
+        # Force creation of custom ISO from provided path (even if one already exists)
+        $script:createCustomIso = $true
     }
     elseif (Test-Path $existingCustomIsoPath) {
         # Custom ISO already exists for this version - use it directly
-        $script:effectiveIsoPath = $null  # Not needed since we'll use custom ISO
-        Write-Information "Found existing custom ISO for Windows Server $WindowsVersion - no original ISO needed" -InformationAction Continue
+        $script:effectiveIsoPath = $null  # Not needed since we'll use existing custom ISO
+        Write-Information "Found existing custom ISO for Windows Server $WindowsVersion - using existing custom ISO" -InformationAction Continue
         Write-Information "Custom ISO: $existingCustomIsoPath" -InformationAction Continue
+        $script:createCustomIso = $false
     }
     else {
-        # No custom ISO exists and no ISO provided - try to find one or fail
+        # No custom ISO exists and no ISO provided - try to find one for this version
         Write-Information "No custom ISO found for Windows Server $WindowsVersion, searching for original ISO..." -InformationAction Continue
         $foundIso = Find-WindowsServerIso
         if ($foundIso -is [string] -and -not [string]::IsNullOrWhiteSpace($foundIso)) {
             $script:effectiveIsoPath = $foundIso
-            Write-Information "Auto-detected ISO: $($script:effectiveIsoPath)" -InformationAction Continue
+            Write-Information "Auto-detected ISO for Windows Server $WindowsVersion`: $($script:effectiveIsoPath)" -InformationAction Continue
+            $script:createCustomIso = $true
         }
         elseif ($foundIso -is [array]) {
             # Defensive: If Find-WindowsServerIso ever returns an array, pick the first valid string
             $firstString = $foundIso | Where-Object { $_ -is [string] -and -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1
             if ($firstString) {
                 $script:effectiveIsoPath = $firstString
-                Write-Information "Auto-detected ISO: $($script:effectiveIsoPath)" -InformationAction Continue
+                Write-Information "Auto-detected ISO for Windows Server $WindowsVersion`: $($script:effectiveIsoPath)" -InformationAction Continue
+                $script:createCustomIso = $true
             }
             else {
                 throw "No custom ISO found for Windows Server $WindowsVersion and no original ISO available. Please either:`n1. Specify -IsoPath with the original Windows Server $WindowsVersion ISO`n2. Or place the original ISO in a default location"

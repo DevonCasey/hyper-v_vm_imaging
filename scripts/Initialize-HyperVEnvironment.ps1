@@ -31,6 +31,10 @@
 
 .NOTES
     Version: 2.0.0
+    Author: Devon Casey
+    Email: me@devoncasey.com
+    GitHub: https://github.com/DevonCasey
+    Created: July 1, 2025
     Requires: Administrator privileges, Windows 10/Server 2016+
 #>
 
