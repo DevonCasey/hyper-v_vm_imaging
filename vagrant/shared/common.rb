@@ -9,11 +9,64 @@
 require 'json'
 require 'yaml'
 
-class VagrantConfig
-  attr_reader :config_data, :environment_name
+# Helper methods for golden image detection
+def get_available_golden_images
+  # Get list of Vagrant boxes that match the golden image pattern
+  boxes = `vagrant box list`.split("\n")
+  golden_boxes = boxes.select { |box| box.match(/windows-server-\d{4}-golden/) }
   
-  def initialize(environment_name)
+  golden_images = {}
+  golden_boxes.each do |box|
+    # Extract box name and version
+    match = box.match(/^(windows-server-(\d{4})-golden)/)
+    if match
+      box_name = match[1]
+      version = match[2]
+      golden_images[version] = {
+        'box_name' => box_name,
+        'version' => version,
+        'os_name' => "windows-server-#{version}"
+      }
+    end
+  end
+  
+  golden_images
+end
+
+def get_default_golden_image
+  available_images = get_available_golden_images
+  
+  if available_images.empty?
+    # Fallback to expected naming convention
+    return {
+      'box_name' => 'windows-server-2019-golden',
+      'version' => '2019',
+      'os_name' => 'windows-server-2019'
+    }
+  end
+  
+  # Prefer the latest version available
+  latest_version = available_images.keys.sort.last
+  available_images[latest_version]
+end
+
+def select_golden_image(preferred_version = nil)
+  available_images = get_available_golden_images
+  
+  if preferred_version && available_images.key?(preferred_version)
+    return available_images[preferred_version]
+  end
+  
+  # If preferred version not available or not specified, use default
+  get_default_golden_image
+end
+
+class VagrantConfig
+  attr_reader :config_data, :environment_name, :golden_image_info
+  
+  def initialize(environment_name, preferred_version = nil)
     @environment_name = environment_name
+    @golden_image_info = select_golden_image(preferred_version)
     @config_data = load_configuration
   end
   
@@ -42,16 +95,22 @@ class VagrantConfig
   end
   
   def default_configuration
+    # Use detected golden image information
+    golden_image = @golden_image_info
+    
     {
       "global" => {
-        "default_os" => "windows-server-2025",
+        "default_os" => golden_image['os_name'],
+        "windows_version" => golden_image['version'],
         "workgroup_name" => "SERVERS",
         "timezone" => "Eastern Standard Time",
         "default_switch" => "Virtual Switch VLAN Trunk",
         "default_vlan" => 31
       },
       "golden_image" => {
-        "box_name" => "windows-server-2025-golden"
+        "box_name" => golden_image['box_name'],
+        "version" => golden_image['version'],
+        "os_name" => golden_image['os_name']
       },
       "vagrant" => {
         "default_credentials" => {
@@ -77,7 +136,7 @@ class VagrantConfig
             "heartbeat" => true,
             "key_value_pair_exchange" => true,
             "shutdown" => true,
-            "time_synchronization" => false,
+            "time_synchronization" => false, # important so the VM gets its time from the DC
             "vss" => true
           }
         }
@@ -123,7 +182,23 @@ class VagrantConfig
   end
   
   def golden_image_box
-    config_data.dig("golden_image", "box_name") || "windows-server-2025-golden"
+    @golden_image_info['box_name'] || config_data.dig("golden_image", "box_name") || "windows-server-2025-golden"
+  end
+  
+  def windows_version
+    @golden_image_info['version'] || config_data.dig("golden_image", "version") || config_data.dig("global", "windows_version") || "2025"
+  end
+  
+  def windows_os_name
+    @golden_image_info['os_name'] || config_data.dig("golden_image", "os_name") || config_data.dig("global", "default_os") || "windows-server-2025"
+  end
+  
+  def golden_image_info
+    {
+      'box_name' => golden_image_box,
+      'version' => windows_version,
+      'os_name' => windows_os_name
+    }
   end
   
   def environment_config
@@ -153,15 +228,28 @@ class VagrantConfig
   def get_timeout(key, default_value = 300)
     timeouts[key] || default_value
   end
+  
+  # Class method for interactive golden image selection
+  def self.create_with_interactive_selection(environment_name)
+    if ARGV[0] == "up" && ENV['VAGRANT_SELECT_IMAGE']
+      golden_image = interactive_golden_image_selection
+      new(environment_name, golden_image['version'])
+    else
+      new(environment_name)
+    end
+  end
 end
 
 # Interactive VM configuration
-def get_vm_configuration(environment_name, config_helper)
+def get_vm_configuration(environment_name)
+  # Create config helper
+  config_helper = VagrantConfig.new(environment_name)
   vm_config = {}
   
   if ARGV[0] == "up" && (ARGV.length == 2 || ENV['VAGRANT_INTERACTIVE'])
     puts "\n" + "=" * 60
     puts "   #{environment_name.upcase} VM Configuration"
+    puts "   Golden Image: #{config_helper.golden_image_box} (#{config_helper.windows_os_name})"
     puts "=" * 60
     puts ""
     
@@ -171,22 +259,7 @@ def get_vm_configuration(environment_name, config_helper)
     vm_name = $stdin.gets.chomp
     vm_config[:name] = vm_name.empty? ? default_name : vm_name
     
-    # Get data drive configuration
-    print "Enter data drive name [Data]: "
-    drive_name_input = $stdin.gets.chomp
-    vm_config[:drive_name] = drive_name_input.empty? ? "Data" : drive_name_input
-    vm_config[:drive_letter] = vm_config[:drive_name][0].upcase
-    
-    # Get drive size
-    default_size = config_helper.get_vm_setting("default_drive_size", 25)
-    print "Enter size for #{vm_config[:drive_letter]}: drive (GB) [#{default_size}]: "
-    drive_size_input = $stdin.gets.chomp
-    vm_config[:drive_size] = drive_size_input.empty? ? default_size : drive_size_input.to_i
-    
-    # Get drive type
-    print "Fixed size drive? (y/n) [n]: "
-    fixed_input = $stdin.gets.chomp.downcase
-    vm_config[:fixed_size] = (fixed_input == 'y' || fixed_input == 'yes')
+
     
     # Resource configuration
     default_memory = config_helper.get_vm_setting("memory", 2048)
@@ -199,12 +272,56 @@ def get_vm_configuration(environment_name, config_helper)
     cpu_input = $stdin.gets.chomp
     vm_config[:cpus] = cpu_input.empty? ? default_cpus : cpu_input.to_i
     
+    # Domain joining configuration (available for all environments)
+    puts ""
+    print "Join a domain? (y/n) [n]: "
+    join_domain_input = $stdin.gets.chomp.downcase
+    vm_config[:join_domain] = (join_domain_input == 'y' || join_domain_input == 'yes')
+    
+    if vm_config[:join_domain]
+      print "Enter domain FQDN (e.g., contoso.local): "
+      vm_config[:domain_fqdn] = $stdin.gets.chomp
+      
+      if vm_config[:domain_fqdn].empty?
+        puts "Error: Domain FQDN is required for domain join"
+        exit 1
+      end
+      
+      print "Enter domain join username (e.g., DOMAIN\\admin or admin@domain.com): "
+      vm_config[:domain_username] = $stdin.gets.chomp
+      
+      if vm_config[:domain_username].empty?
+        puts "Error: Domain username is required for domain join"
+        exit 1
+      end
+      
+      print "Enter domain join password: "
+      begin
+        # Hide password input on Windows/Unix
+        require 'io/console'
+        vm_config[:domain_password] = $stdin.noecho(&:gets).chomp
+      rescue LoadError
+        # Fallback for systems without io/console
+        vm_config[:domain_password] = $stdin.gets.chomp
+      end
+      puts "" # New line after hidden input
+      
+      if vm_config[:domain_password].empty?
+        puts "Error: Domain password is required for domain join"
+        exit 1
+      end
+    end
+    
     puts ""
     puts "Configuration Summary:"
     puts "  VM Name: #{vm_config[:name]}"
-    puts "  #{vm_config[:drive_letter]}: Drive: #{vm_config[:drive_size]}GB (#{vm_config[:fixed_size] ? 'Fixed' : 'Dynamic'})"
     puts "  Memory: #{vm_config[:memory]}MB"
     puts "  CPUs: #{vm_config[:cpus]}"
+    if vm_config[:join_domain]
+      puts "  Domain: #{vm_config[:domain_fqdn]} (User: #{vm_config[:domain_username]})"
+    else
+      puts "  Domain: Workgroup (not joining domain)"
+    end
     puts ""
     
     print "Continue with this configuration? (Y/n): "
@@ -216,13 +333,17 @@ def get_vm_configuration(environment_name, config_helper)
   else
     # Use defaults from configuration
     vm_config[:name] = "ax-#{environment_name}image"
-    vm_config[:drive_name] = "Data"
-    vm_config[:drive_letter] = "D"
-    vm_config[:drive_size] = config_helper.get_vm_setting("default_drive_size", 25)
-    vm_config[:fixed_size] = false
     vm_config[:memory] = config_helper.get_vm_setting("memory", 2048)
     vm_config[:cpus] = config_helper.get_vm_setting("cpus", 2)
+    vm_config[:join_domain] = false
   end
+
+  # Validate that the golden image exists
+  validate_box_exists(vm_config[:box_name])
+  
+  # Add the golden image box name to the config
+  vm_config[:box_name] = config_helper.golden_image_box
+
   
   vm_config
 end
@@ -281,46 +402,13 @@ def configure_hyperv_provider(config, vm_config, config_helper)
       vss: integration_services["vss"] || true
     }
     
-    # Disk configuration
+    # OS disk configuration
     hv.vhdx_name = "#{vm_config[:name]}_os.vhdx"
-    hv.additional_disk_path = "#{vm_config[:name]}_#{vm_config[:drive_letter].downcase}.vhdx"
-    hv.maxmemory = nil if vm_config[:fixed_size]
     
     # VLAN configuration
     global_config = config_helper.global_config
     hv.vlan_id = global_config["default_vlan"] || 31
   end
-end
-
-# Data drive creation trigger
-def configure_data_drive_trigger(config, vm_config)
-  config.trigger.before :up do |trigger|
-    trigger.info = "Creating #{vm_config[:drive_letter]}: drive (#{vm_config[:drive_name]})..."
-    trigger.run = {
-      inline: powershell_drive_creation_script(vm_config)
-    }
-  end
-end
-
-def powershell_drive_creation_script(vm_config)
-  <<~POWERSHELL
-    powershell -Command "
-      $DrivePath = '#{vm_config[:name]}_#{vm_config[:drive_letter].downcase}.vhdx'
-      $DriveSize = #{vm_config[:drive_size]}GB
-      $FixedSize = $#{vm_config[:fixed_size]}
-      
-      if (!(Test-Path $DrivePath)) {
-        if ($FixedSize) {
-          New-VHD -Path $DrivePath -SizeBytes $DriveSize -Fixed
-        } else {
-          New-VHD -Path $DrivePath -SizeBytes $DriveSize -Dynamic
-        }
-        Write-Host 'Created #{vm_config[:drive_letter]}: drive (#{vm_config[:drive_name]}): ' $DrivePath
-      } else {
-        Write-Host '#{vm_config[:drive_letter]}: drive already exists: ' $DrivePath
-      }
-    "
-  POWERSHELL
 end
 
 # Common provisioning scripts
@@ -332,28 +420,8 @@ def get_base_provisioning_script(vm_config, config_helper)
     Write-Host "=== Base Configuration Starting ===" -ForegroundColor Green
     Write-Host ("=" * 60) 
     
-    $DriveLetter = "#{vm_config[:drive_letter]}"
-    $DriveName = "#{vm_config[:drive_name]}"
     $WorkgroupName = "#{global_config['workgroup_name'] || 'SERVERS'}"
     $TimeZone = "#{global_config['timezone'] || 'Eastern Standard Time'}"
-    
-    # Initialize and format data drive
-    Write-Host "Configuring $DriveLetter`: drive ($DriveName)..." -ForegroundColor Yellow
-    try {
-        # Get the disk that is not initialized (should be our new data drive)
-        $NewDisk = Get-Disk | Where-Object {$_.PartitionStyle -eq 'RAW' -and $_.Size -gt 1GB} | Select-Object -First 1
-        if ($NewDisk) {
-            Write-Host "Found uninitialized disk, setting up as $DriveLetter`: drive..." -ForegroundColor Green
-            $NewDisk | Initialize-Disk -PartitionStyle GPT -PassThru | 
-                New-Partition -DriveLetter $DriveLetter -UseMaximumSize | 
-                Format-Volume -FileSystem NTFS -NewFileSystemLabel $DriveName -Confirm:$false
-            Write-Host "$DriveLetter`: drive ($DriveName) configured successfully!" -ForegroundColor Green
-        } else {
-            Write-Host "No uninitialized disk found, $DriveLetter`: drive may already be configured" -ForegroundColor Yellow
-        }
-    } catch {
-        Write-Warning "Failed to configure $DriveLetter`: drive: $($_.Exception.Message)"
-    }
     
     # Set timezone
     Write-Host "Setting timezone to $TimeZone..." -ForegroundColor Yellow
@@ -364,19 +432,59 @@ def get_base_provisioning_script(vm_config, config_helper)
         Write-Warning "Failed to set timezone: $($_.Exception.Message)"
     }
     
-    # Join workgroup
-    Write-Host "Joining $WorkgroupName workgroup..." -ForegroundColor Yellow
-    $ComputerSystem = Get-WmiObject -Class Win32_ComputerSystem
+    # Domain joining or workgroup configuration
+    $JoinDomain = $#{vm_config[:join_domain] ? 'true' : 'false'}
+    $DomainFQDN = "#{vm_config[:domain_fqdn] || ''}"
+    $DomainUsername = "#{vm_config[:domain_username] || ''}"
+    $DomainPassword = "#{vm_config[:domain_password] || ''}"
     
-    if ($ComputerSystem.Workgroup -ne $WorkgroupName) {
+    if ($JoinDomain -eq $true -and $DomainFQDN -ne "") {
+        Write-Host "Joining domain: $DomainFQDN..." -ForegroundColor Yellow
         try {
-            Add-Computer -WorkgroupName $WorkgroupName -Force
-            Write-Host "Successfully joined workgroup: $WorkgroupName" -ForegroundColor Green
+            $SecurePassword = ConvertTo-SecureString $DomainPassword -AsPlainText -Force
+            $Credential = New-Object System.Management.Automation.PSCredential($DomainUsername, $SecurePassword)
+            
+            # Test domain connectivity first
+            Write-Host "Testing domain connectivity..." -ForegroundColor Yellow
+            $DomainController = (Resolve-DnsName -Name $DomainFQDN -Type A -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
+            
+            if ($DomainController) {
+                Write-Host "Domain controller found: $DomainController" -ForegroundColor Green
+                
+                # Join the domain
+                Add-Computer -DomainName $DomainFQDN -Credential $Credential -Force -Restart:$false
+                Write-Host "Successfully joined domain: $DomainFQDN" -ForegroundColor Green
+                Write-Host "Note: VM will need to be restarted to complete domain join" -ForegroundColor Yellow
+            } else {
+                Write-Warning "Could not resolve domain controller for: $DomainFQDN"
+                Write-Host "Falling back to workgroup configuration..." -ForegroundColor Yellow
+                Add-Computer -WorkgroupName $WorkgroupName -Force
+            }
         } catch {
-            Write-Warning "Failed to join workgroup: $($_.Exception.Message)"
+            Write-Warning "Failed to join domain: $($_.Exception.Message)"
+            Write-Host "Falling back to workgroup configuration..." -ForegroundColor Yellow
+            try {
+                Add-Computer -WorkgroupName $WorkgroupName -Force
+                Write-Host "Successfully joined workgroup: $WorkgroupName" -ForegroundColor Green
+            } catch {
+                Write-Warning "Failed to join workgroup: $($_.Exception.Message)"
+            }
         }
     } else {
-        Write-Host "Already member of workgroup: $WorkgroupName" -ForegroundColor Green
+        # Join workgroup
+        Write-Host "Joining $WorkgroupName workgroup..." -ForegroundColor Yellow
+        $ComputerSystem = Get-WmiObject -Class Win32_ComputerSystem
+        
+        if ($ComputerSystem.Workgroup -ne $WorkgroupName) {
+            try {
+                Add-Computer -WorkgroupName $WorkgroupName -Force
+                Write-Host "Successfully joined workgroup: $WorkgroupName" -ForegroundColor Green
+            } catch {
+                Write-Warning "Failed to join workgroup: $($_.Exception.Message)"
+            }
+        } else {
+            Write-Host "Already member of workgroup: $WorkgroupName" -ForegroundColor Green
+        }
     }
     
     # Enable ping
@@ -425,18 +533,27 @@ def get_status_report_script(vm_config, config_helper, environment_description)
   <<~POWERSHELL
     Write-Host ("=" * 60) 
     Write-Host "#{environment_description.upcase} READY" -ForegroundColor Green
+    Write-Host "Golden Image: #{config_helper.golden_image_box}" -ForegroundColor Green
     Write-Host ("=" * 60) 
-    
-    $DriveLetter = "#{vm_config[:drive_letter]}"
-    $DriveName = "#{vm_config[:drive_name]}"
     
     # Display system information
     $ComputerInfo = Get-ComputerInfo
     $TimeZone = Get-TimeZone
-    $Workgroup = (Get-WmiObject -Class Win32_ComputerSystem).Workgroup
+    $ComputerSystem = Get-WmiObject -Class Win32_ComputerSystem
     
     Write-Host "Server Name: $env:COMPUTERNAME" -ForegroundColor White
-    Write-Host "Workgroup: $Workgroup" -ForegroundColor White
+    Write-Host "Golden Image: #{config_helper.golden_image_box}" -ForegroundColor White
+    Write-Host "Windows Version: #{config_helper.windows_version}" -ForegroundColor White
+    
+    # Display domain or workgroup status
+    if ($ComputerSystem.PartOfDomain) {
+        Write-Host "Domain: $($ComputerSystem.Domain)" -ForegroundColor White
+        Write-Host "Domain Status: Member" -ForegroundColor Green
+    } else {
+        Write-Host "Workgroup: $($ComputerSystem.Workgroup)" -ForegroundColor White
+        Write-Host "Domain Status: Not joined" -ForegroundColor Yellow
+    }
+    
     Write-Host "Timezone: $($TimeZone.Id) ($($TimeZone.DisplayName))" -ForegroundColor White
     Write-Host "OS Version: $($ComputerInfo.WindowsProductName)" -ForegroundColor White
     Write-Host "Last Boot: $($ComputerInfo.LastBootUpTime)" -ForegroundColor White
@@ -444,7 +561,6 @@ def get_status_report_script(vm_config, config_helper, environment_description)
     # Storage information
     Write-Host "`nStorage Configuration:" 
     Write-Host "  - C:\\\\ (OS drive)" -ForegroundColor White
-    Write-Host "  - $DriveLetter`:\\\\ ($DriveName drive)" -ForegroundColor White
     
     # Network information
     $IPAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*"}).IPAddress
@@ -460,6 +576,46 @@ def get_status_report_script(vm_config, config_helper, environment_description)
   POWERSHELL
 end
 
+def interactive_golden_image_selection
+  available_images = get_available_golden_images
+  
+  if available_images.empty?
+    puts "No golden images found! Please build a golden image first."
+    return get_default_golden_image
+  end
+  
+  if available_images.length == 1
+    # Only one option, use it
+    version = available_images.keys.first
+    puts "Found golden image: #{available_images[version]['box_name']}"
+    return available_images[version]
+  end
+  
+  # Multiple options, let user choose
+  puts "\nAvailable Golden Images:"
+  available_images.each_with_index do |(version, info), index|
+    puts "  #{index + 1}. #{info['box_name']} (Windows Server #{version})"
+  end
+  
+  print "\nSelect golden image [1]: "
+  choice = $stdin.gets.chomp
+  
+  if choice.empty?
+    choice = "1"
+  end
+  
+  index = choice.to_i - 1
+  versions = available_images.keys.sort
+  
+  if index >= 0 && index < versions.length
+    selected_version = versions[index]
+    available_images[selected_version]
+  else
+    puts "Invalid selection, using default."
+    get_default_golden_image
+  end
+end
+
 # Validation helpers
 def validate_box_exists(box_name)
   # Check if the golden image box exists
@@ -469,10 +625,23 @@ def validate_box_exists(box_name)
     puts ""
     puts "ERROR: Golden image box '#{box_name}' not found!"
     puts ""
-    puts "Please build the golden image first:"
-    puts "  .\\scripts\\Build-WeeklyGoldenImage.ps1"
+    
+    # Show available golden images
+    available_images = get_available_golden_images
+    if available_images.any?
+      puts "Available golden images:"
+      available_images.each do |version, info|
+        puts "  - #{info['box_name']} (Windows Server #{version})"
+      end
+      puts ""
+      puts "To use a different version, modify your configuration or rebuild the golden image."
+    else
+      puts "No golden images found!"
+    end
+    
     puts ""
-    puts "Or check if the box name is correct in your configuration."
+    puts "Please build the golden image first:"
+    puts "  .\\scripts\\Build-GoldenImage.ps1"
     puts ""
     exit 1
   end

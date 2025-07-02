@@ -1,112 +1,70 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
+# Load shared configuration
+require_relative '../shared/common.rb'
+
 Vagrant.configure("2") do |config|
+  # Get VM configuration from shared module
+  vm_config = get_vm_configuration("domain-controller")
+  
+  # Create config helper for accessing shared settings
+  config_helper = VagrantConfig.new("domain-controller")
+  
   # Use the golden image
-  config.vm.box = "windows-server-2025-golden"
+  config.vm.box = vm_config[:box_name]
   
-  # Prompt for VM name and drive configuration
-  vm_name = nil
-  drive_name = nil
-  drive_letter = nil
-  drive_size = nil
-  fixed_size = nil
+  # Apply common VM settings
+  configure_common_vm_settings(config, vm_config, config_helper)
   
-  if ARGV[0] == "up" && ARGV.length == 2
-    print "Enter VM name: "
-    vm_name = $stdin.gets.chomp
-    vm_name = "ax-dcimage" if vm_name.empty?
-    
-    print "Enter data drive name (e.g., 'Data'): "
-    drive_name_input = $stdin.gets.chomp
-    drive_name = drive_name_input.empty? ? "Data" : drive_name_input
-    drive_letter = drive_name[0].upcase
-    
-    print "Enter size for #{drive_letter}: drive (in GB): "
-    drive_size_input = $stdin.gets.chomp
-    drive_size = drive_size_input.empty? ? 50 : drive_size_input.to_i
-    
-    print "Fixed size drive? (y/n): "
-    fixed_input = $stdin.gets.chomp.downcase
-    fixed_size = fixed_input.empty? || fixed_input == 'y' || fixed_input == 'yes'
-  else
-    vm_name = "ax-dcimage"
-    drive_name = "#{vm_name}_d"
-    drive_letter = "D"
-    drive_size = 50
-    fixed_size = true
-  end
-  
-  # VM settings
-  config.vm.hostname = vm_name
-  config.vm.guest = :windows
-  config.vm.communicator = "winrm"
-  
-  # WinRM configuration
-  config.winrm.username = "vagrant"
-  config.winrm.password = "vagrant"
-  config.winrm.transport = :plaintext
-  config.winrm.basic_auth_only = true
-  config.winrm.timeout = 300
-  config.winrm.retry_limit = 20
-  
-  # Hyper-V provider settings
+  # Configure Hyper-V provider with domain-controller specific overrides
   config.vm.provider "hyperv" do |hv|
-    hv.vmname = "#{vm_name}-DomainController"
-    hv.cpus = 4
-    hv.memory = 4096
-    hv.enable_virtualization_extensions = false
-    hv.linked_clone = false  # Full copy instead of linked clone
-    hv.enable_secure_boot = false
-    hv.enable_automatic_checkpoints = false
-    hv.enable_checkpoints = false
-    hv.vm_integration_services = {
-      guest_service_interface: true,
-      heartbeat: true,
-      key_value_pair_exchange: true,
-      shutdown: true,
-      time_synchronization: false,  # Disable time sync
-      vss: true
-    }
-    hv.vhdx_name = "#{vm_name}_os.vhdx"
+    hv.vmname = "#{vm_config[:name]}-DomainController"
+    hv.cpus = vm_config[:cpus]
+    hv.memory = 4096  # Domain controller memory
     
-    # Create additional Active Directory drive
-    hv.additional_disk_path = "#{vm_name}_#{drive_letter.downcase}.vhdx"
-    hv.maxmemory = nil if fixed_size
-    hv.enable_enhanced_session_mode = true
-  end
-  
-  # Create and attach Active Directory drive
-  config.trigger.before :up do |trigger|
-    trigger.info = "Creating #{drive_letter}: drive (#{drive_name})..."
-    trigger.run = {
-      inline: "powershell -Command \"" +
-        "$DrivePath = '#{vm_name}_#{drive_letter.downcase}.vhdx'; " +
-        "$DriveSize = #{drive_size}GB; " +
-        "$FixedSize = $#{fixed_size}; " +
-        "if (!(Test-Path $DrivePath)) { " +
-          "if ($FixedSize) { " +
-            "New-VHD -Path $DrivePath -SizeBytes $DriveSize -Fixed; " +
-          "} else { " +
-            "New-VHD -Path $DrivePath -SizeBytes $DriveSize -Dynamic; " +
-          "} " +
-          "Write-Host 'Created #{drive_letter}: drive (#{drive_name}): ' $DrivePath; " +
-        "} else { " +
-          "Write-Host '#{drive_letter}: drive already exists: ' $DrivePath; " +
-        "}\""
+    # Apply VM defaults from configuration
+    vm_defaults = config_helper.vm_defaults
+    hv.enable_virtualization_extensions = vm_defaults["enable_virtualization_extensions"] || false
+    hv.linked_clone = vm_defaults["linked_clone"] || false
+    hv.enable_secure_boot = vm_defaults["enable_secure_boot"] || false
+    hv.enable_automatic_checkpoints = vm_defaults["enable_automatic_checkpoints"] || false
+    hv.enable_checkpoints = false
+    hv.enable_enhanced_session_mode = vm_defaults["enable_enhanced_session_mode"] || true
+    
+    # VM Integration Services
+    integration_services = vm_defaults["vm_integration_services"] || {}
+    hv.vm_integration_services = {
+      guest_service_interface: integration_services["guest_service_interface"] || true,
+      heartbeat: integration_services["heartbeat"] || true,
+      key_value_pair_exchange: integration_services["key_value_pair_exchange"] || true,
+      shutdown: integration_services["shutdown"] || true,
+      time_synchronization: integration_services["time_synchronization"] || false,
+      vss: integration_services["vss"] || true
     }
+    
+    # Disk configuration
+    hv.vhdx_name = "#{vm_config[:name]}_os.vhdx"
+    hv.additional_disk_path = "#{vm_config[:name]}_#{vm_config[:drive_letter].downcase}.vhdx"
+    hv.maxmemory = nil if vm_config[:fixed_size]
+    
+    # VLAN configuration
+    global_config = config_helper.global_config
+    hv.vlan_id = global_config["default_vlan"] || 31
   end
   
-  # Network configuration
-  config.vm.network "public_network", bridge: "Virtual Switch VLAN Trunk"
-  
-  # Configure VLAN 31 for Hyper-V
-  config.vm.provider "hyperv" do |hv, override|
-    hv.vlan_id = 31
-  end
+  # Configure data drive creation trigger
+  configure_data_drive_trigger(config, vm_config)
   
   # Install Active Directory Domain Services and promote to Domain Controller
-  config.vm.provision "powershell", inline: <<-SHELL, env: {"DRIVE_LETTER" => drive_letter, "DRIVE_NAME" => drive_name}
+  config.vm.provision "powershell", inline: <<-SHELL, env: {
+    "DRIVE_LETTER" => vm_config[:drive_letter], 
+    "DRIVE_NAME" => vm_config[:drive_name],
+    "JOIN_DOMAIN" => vm_config[:join_domain].to_s,
+    "DOMAIN_FQDN" => vm_config[:domain_fqdn] || "",
+    "DOMAIN_USERNAME" => vm_config[:domain_username] || "",
+    "DOMAIN_PASSWORD" => vm_config[:domain_password] || ""
+  }
     Write-Host ("=" * 60) 
     Write-Host "=== Active Directory Domain Services Installation Starting ===" -ForegroundColor Green
     Write-Host ("=" * 60) 

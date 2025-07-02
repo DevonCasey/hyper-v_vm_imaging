@@ -151,26 +151,32 @@
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>4</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "winrm quickconfig -q -force"</CommandLine>
-                    <Description>Configure WinRM</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Configuring WinRM...'; winrm quickconfig -q -force; if ($LASTEXITCODE -ne 0) { Write-Host 'WinRM quickconfig failed, retrying...'; Start-Sleep 5; winrm quickconfig -q -force }"</CommandLine>
+                    <Description>Configure WinRM with retry</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>5</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "winrm set winrm/config/service/auth '@{Basic=\"true\"}'"</CommandLine>
-                    <Description>Enable WinRM Basic Auth</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Setting WinRM auth...'; winrm set winrm/config/service/auth '@{Basic=\"true\"}'; winrm set winrm/config/service/auth '@{Kerberos=\"true\"}'; winrm set winrm/config/service/auth '@{Negotiate=\"true\"}'"</CommandLine>
+                    <Description>Enable WinRM Authentication Methods</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>6</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}'"</CommandLine>
-                    <Description>Allow WinRM Unencrypted</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Setting WinRM service config...'; winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}'; winrm set winrm/config/service '@{MaxConcurrentOperationsPerUser=\"4294967295\"}'; winrm set winrm/config/service '@{MaxConnections=\"300\"}'"</CommandLine>
+                    <Description>Configure WinRM Service Settings</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>7</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Set-Service WinRM -StartupType Automatic; Start-Service WinRM"</CommandLine>
-                    <Description>Start WinRM Service</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Setting WinRM listener...'; winrm set winrm/config/listener?Address=*+Transport=HTTP '@{Port=\"5985\"}'; winrm set winrm/config/winrs '@{MaxMemoryPerShellMB=\"2048\"}'; winrm set winrm/config/winrs '@{MaxShellsPerUser=\"30\"}'"</CommandLine>
+                    <Description>Configure WinRM Listener and Shell Settings</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
+                </SynchronousCommand>
+                <SynchronousCommand wcm:action="add">
+                    <Order>8</Order>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Starting WinRM service...'; Set-Service WinRM -StartupType Automatic; Restart-Service WinRM -Force; Start-Sleep 3; Get-Service WinRM | Format-Table Status, StartType, Name"</CommandLine>
+                    <Description>Start and Verify WinRM Service</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
@@ -181,56 +187,56 @@
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>9</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Enable-PSRemoting -Force -SkipNetworkProfileCheck"</CommandLine>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Enabling PowerShell Remoting...'; Enable-PSRemoting -Force -SkipNetworkProfileCheck; Set-PSSessionConfiguration -ShowSecurityDescriptorUI:$false -Force -Name Microsoft.PowerShell"</CommandLine>
                     <Description>Enable PowerShell Remoting</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>10</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "netsh advfirewall firewall set rule group=\"Windows Remote Management\" new enable=yes"</CommandLine>
-                    <Description>Enable WinRM Firewall Rules</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Configuring Windows Firewall for WinRM...'; netsh advfirewall firewall set rule group=\"Windows Remote Management\" new enable=yes; netsh advfirewall firewall add rule name=\"WinRM HTTP\" dir=in action=allow protocol=TCP localport=5985; netsh advfirewall firewall add rule name=\"WinRM HTTPS\" dir=in action=allow protocol=TCP localport=5986"</CommandLine>
+                    <Description>Enable WinRM Firewall Rules with explicit ports</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>11</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "netsh advfirewall firewall set rule group=\"Network Discovery\" new enable=yes"</CommandLine>
-                    <Description>Enable Network Discovery</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Setting firewall profiles...'; netsh advfirewall set privateprofile state off; netsh advfirewall set domainprofile state off; netsh advfirewall set publicprofile state off"</CommandLine>
+                    <Description>Disable All Firewall Profiles for VM Build</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>12</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "netsh advfirewall firewall set rule group=\"File and Printer Sharing\" new enable=yes"</CommandLine>
-                    <Description>Enable File and Printer Sharing</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Testing WinRM connectivity...'; Test-WSMan -ComputerName localhost -ErrorAction SilentlyContinue; if ($?) { Write-Host 'WinRM test successful' } else { Write-Host 'WinRM test failed, checking service...; Get-Service WinRM }"</CommandLine>
+                    <Description>Test WinRM Connectivity</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>13</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "winrm set winrm/config/winrs '@{MaxMemoryPerShellMB=\"2048\"}'"</CommandLine>
-                    <Description>Increase WinRM Memory Limit</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Enabling file sharing...'; netsh advfirewall firewall set rule group=\"File and Printer Sharing\" new enable=yes; netsh advfirewall firewall set rule group=\"Network Discovery\" new enable=yes"</CommandLine>
+                    <Description>Enable File and Printer Sharing and Network Discovery</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>14</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "netsh advfirewall set privateprofile state off; netsh advfirewall set domainprofile state off"</CommandLine>
-                    <Description>Disable Private and Domain Firewall Profiles for VM Build</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Configuring network settings...'; netsh interface ip set global dhcpmediasense=disabled; Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue"</CommandLine>
+                    <Description>Configure Network Settings and DHCP Media Sense</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>15</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "netsh interface ip set global dhcpmediasense=disabled"</CommandLine>
-                    <Description>Disable DHCP Media Sense for Network Stability</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Enabling ICMP...'; netsh advfirewall firewall add rule name=\"ICMP Allow incoming V4 echo request\" protocol=icmpv4:8,any dir=in action=allow; netsh advfirewall firewall add rule name=\"ICMP Allow incoming V6 echo request\" protocol=icmpv6:128,any dir=in action=allow"</CommandLine>
+                    <Description>Enable IPv4 and IPv6 Ping Response</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>16</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "netsh advfirewall firewall add rule name=\"ICMP Allow incoming V4 echo request\" protocol=icmpv4:8,any dir=in action=allow"</CommandLine>
-                    <Description>Enable IPv4 Ping Response</Description>
+                    <CommandLine>reg add "HKLM\SYSTEM\CurrentControlSet\Control\Network" /v NewNetworkWindowOff /t REG_SZ /d "" /f</CommandLine>
+                    <Description>Disable Network Location Wizard to Prevent Interactive Prompts</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>17</Order>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "netsh advfirewall firewall add rule name=\"ICMP Allow incoming V6 echo request\" protocol=icmpv6:128,any dir=in action=allow"</CommandLine>
-                    <Description>Enable IPv6 Ping Response</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "Write-Host 'Final WinRM validation...'; $ip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias '*Ethernet*' | Where-Object {$_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1'} | Select-Object -First 1).IPAddress; Write-Host \"VM IP Address: $ip\"; netstat -an | findstr :5985; Write-Host 'WinRM setup complete.'"</CommandLine>
+                    <Description>Display Network Configuration for Troubleshooting</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                 </SynchronousCommand>
             </FirstLogonCommands>

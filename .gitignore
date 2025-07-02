@@ -23,6 +23,14 @@ Thumbs.db
 *.tmp
 *.bak
 
+# Autounattend files (contain sensitive passwords)
+*autounattend*.xml
+autounattend-temp-*.xml
+**/autounattend-temp-*.xml
+
+# Other XML files
+*.xml
+
 # PowerShell transcripts
 PowerShell_transcript.*.txt
 
@@ -32,6 +40,11 @@ output-hyperv-iso/
 # Build artifacts
 *.box
 boxes/
+
+# Credential files (contain sensitive passwords)
+*credentials*.json
+*credentials*.txt
+windows-server-*-credentials.*
 
 # ISO files
 *.iso

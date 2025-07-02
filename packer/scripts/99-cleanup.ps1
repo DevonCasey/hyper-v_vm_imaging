@@ -40,6 +40,9 @@ try {
     Write-Host "Clearing browser data..." -ForegroundColor Cyan
     Remove-Item "$env:LOCALAPPDATA\Microsoft\Windows\Temporary Internet Files\*" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item "$env:APPDATA\Microsoft\Windows\Recent\*" -Force -ErrorAction SilentlyContinue
+
+    Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'LocalAccountTokenFilterPolicy' -Value 1 -Type DWord
+    New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\ServerManager' -Name 'DoNotOpenServerManagerAtLogon' -Value 1 -PropertyType DWord -Force
     
     # Clear PowerShell history
     Write-Host "Clearing PowerShell history..." -ForegroundColor Cyan

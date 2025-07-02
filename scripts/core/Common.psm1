@@ -604,6 +604,326 @@ function Test-IsElevated {
 }
 #endregion
 
+#region Password Generation
+function New-RandomSecurePassword {
+    <#
+    .SYNOPSIS
+        A wrapper function for pgen for secure password generation.
+        Provides kinder output and customizable word count and delimiters.
+    
+    .DESCRIPTION
+        Creates a cryptographically secure random passphrase using pgen.exe.
+        Generates random words with customizable delimiters for high entropy.
+        Requires pgen.exe to be available in the system PATH.
+        
+    .PARAMETER WordCount
+        Number of words to generate (default: 6)
+        
+    .PARAMETER Delimiter
+        Delimiter to use between words (default: "-")
+        
+    .EXAMPLE
+        $password = New-RandomSecurePassword
+        
+    .EXAMPLE
+        $password = New-RandomSecurePassword -WordCount 8 -Delimiter "_"
+        
+    .EXAMPLE
+        $password = New-RandomSecurePassword -WordCount 4 -Delimiter ""
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$WordCount = 6,
+        [string]$Delimiter = "-"
+    )
+    
+    try {
+        # Check if pgen.exe is available
+        $pgenPath = Get-Command "pgen.exe" -ErrorAction SilentlyContinue
+        if (-not $pgenPath) {
+            throw "pgen.exe not found in PATH. Please install pgen.exe to generate secure passwords."
+        }
+        
+        Write-Verbose "Using pgen.exe for secure password generation"
+        
+        # Generate words with specified delimiter to create a strong passphrase
+        $pgenArgs = @("-n", $WordCount.ToString())
+        if ($Delimiter) {
+            $pgenArgs += @("-d", $Delimiter)
+        }
+        
+        # Execute pgen.exe
+        $pgenProcess = Start-Process -FilePath "pgen.exe" -ArgumentList $pgenArgs -PassThru -WindowStyle Hidden -Wait
+        
+        try {
+            $pgenProcess.WaitForExit()
+            if ($pgenProcess.ExitCode -ne 0) {
+                throw "pgen.exe failed with exit code: $($pgenProcess.ExitCode)"
+            }
+        }
+        finally {
+            if ($pgenProcess) {
+                $pgenProcess.Dispose()
+                $pgenProcess = $null
+            }
+        }
+        
+        # Get the password from clipboard
+        try {
+            $password = Get-Clipboard -ErrorAction Stop
+            if ([string]::IsNullOrWhiteSpace($password)) {
+                throw "No password found in clipboard after pgen.exe execution"
+            }
+            
+            # If clipboard contains multiple lines, take the first non-empty one
+            if ($password -is [array]) {
+                $password = ($password | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
+            }
+            
+            $password = $password.ToString().Trim()
+            
+            if ([string]::IsNullOrWhiteSpace($password)) {
+                throw "pgen.exe returned empty or whitespace-only result in clipboard"
+            }
+        }
+        catch {
+            throw "Failed to retrieve password from clipboard: $($_.Exception.Message)"
+        }
+        
+        Write-Verbose "Generated password using pgen.exe: $($password.Length) characters"
+        
+        return ConvertTo-SecureString -String $password -AsPlainText -Force
+    }
+    catch {
+        Write-Error "Failed to generate secure password: $($_.Exception.Message)"
+        throw
+    }
+}
+
+function New-CustomAutounattendXml {
+    <#
+    .SYNOPSIS
+        Creates a customized autounattend.xml file with specified passwords
+    
+    .DESCRIPTION
+        Takes a template autounattend.xml file and replaces password placeholders
+        with actual secure passwords for automated Windows installation.
+        
+    .PARAMETER TemplateXmlPath
+        Path to the template autounattend.xml file
+        
+    .PARAMETER OutputXmlPath
+        Path where the customized autounattend.xml will be saved
+        
+    .PARAMETER AdminPasswordSecure
+        SecureString containing the Administrator password
+        
+    .PARAMETER VagrantPasswordSecure
+        SecureString containing the vagrant user password
+        
+    .PARAMETER WindowsVersion
+        Windows version (2019 or 2025) for version-specific customizations
+        
+    .EXAMPLE
+        New-CustomAutounattendXml -TemplateXmlPath "C:\template.xml" -OutputXmlPath "C:\custom.xml" -AdminPasswordSecure $adminPwd -VagrantPasswordSecure $vagrantPwd -WindowsVersion "2019"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$TemplateXmlPath,
+        
+        [Parameter(Mandatory)]
+        [string]$OutputXmlPath,
+        
+        [Parameter(Mandatory)]
+        [SecureString]$AdminPasswordSecure,
+        
+        [Parameter(Mandatory)]
+        [SecureString]$VagrantPasswordSecure,
+        
+        [Parameter(Mandatory)]
+        [ValidateSet('2019', '2025')]
+        [string]$WindowsVersion
+    )
+    
+    try {
+        # Validate template file exists
+        if (-not (Test-Path $TemplateXmlPath)) {
+            throw "Template autounattend.xml file not found: $TemplateXmlPath"
+        }
+        
+        # Convert SecureStrings to plain text (temporarily, for XML embedding)
+        $adminPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($AdminPasswordSecure))
+        $vagrantPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($VagrantPasswordSecure))
+        
+        try {
+            # Read template content
+            $xmlContent = Get-Content $TemplateXmlPath -Raw
+            
+            # Replace password placeholders
+            $xmlContent = $xmlContent -replace '\{\{ADMIN_PASSWORD\}\}', $adminPassword
+            $xmlContent = $xmlContent -replace '\{\{VAGRANT_PASSWORD\}\}', $vagrantPassword
+            
+            # Write customized content
+            $xmlContent | Set-Content -Path $OutputXmlPath -Encoding UTF8
+            
+            Write-Information "Created customized autounattend.xml: $OutputXmlPath" -InformationAction Continue
+        }
+        finally {
+            # Clear password variables immediately
+            if ($adminPassword) {
+                $adminPassword = $null
+            }
+            if ($vagrantPassword) {
+                $vagrantPassword = $null
+            }
+        }
+    }
+    catch {
+        Write-Error "Failed to create custom autounattend.xml: $($_.Exception.Message)"
+        throw
+    }
+}
+
+function Save-BuildCredentials {
+    <#
+    .SYNOPSIS
+        Saves build credentials to a secure JSON file
+    
+    .DESCRIPTION
+        Creates a JSON file containing the generated passwords and build information.
+        This file should be secured or deleted after the passwords are noted.
+        
+    .PARAMETER AdminPasswordSecure
+        SecureString containing the Administrator password
+        
+    .PARAMETER VagrantPasswordSecure
+        SecureString containing the vagrant user password
+        
+    .PARAMETER OutputPath
+        Path where the credentials JSON file will be saved
+        
+    .PARAMETER WindowsVersion
+        Windows version for the build
+        
+    .EXAMPLE
+        Save-BuildCredentials -AdminPasswordSecure $adminPwd -VagrantPasswordSecure $vagrantPwd -OutputPath "C:\credentials.json" -WindowsVersion "2019"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [SecureString]$AdminPasswordSecure,
+        
+        [Parameter(Mandatory)]
+        [SecureString]$VagrantPasswordSecure,
+        
+        [Parameter(Mandatory)]
+        [string]$OutputPath,
+        
+        [Parameter(Mandatory)]
+        [string]$WindowsVersion
+    )
+    
+    try {
+        # Convert SecureStrings to plain text for JSON
+        $adminPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($AdminPasswordSecure))
+        $vagrantPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($VagrantPasswordSecure))
+        
+        try {
+            # Create credentials object
+            $credentials = @{
+                CreatedDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                Notes = @(
+                    "This file contains sensitive credentials for the Windows Server golden image.",
+                    "Store this file securely and delete it after noting the credentials.",
+                    "Both accounts have local administrator privileges.",
+                    "The vagrant account is used for automated management via Vagrant.",
+                    "Passwords are randomly generated using pgen.exe and meet complexity requirements."
+                )
+                Credentials = @{
+                    Vagrant = @{
+                        Username = "vagrant"
+                        Password = $vagrantPassword
+                        Description = "Vagrant user account"
+                    }
+                    Administrator = @{
+                        Username = "Administrator"
+                        Password = $adminPassword
+                        Description = "Built-in Administrator account"
+                    }
+                }
+                ComputerName = "WIN-TEMP-VM"
+                WindowsVersion = $WindowsVersion
+            }
+            
+            # Convert to JSON and save
+            $credentials | ConvertTo-Json -Depth 3 | Set-Content -Path $OutputPath -Encoding UTF8
+            
+            Write-Information "Build credentials saved to: $OutputPath" -InformationAction Continue
+        }
+        finally {
+            # Clear password variables immediately
+            if ($adminPassword) {
+                $adminPassword = $null
+            }
+            if ($vagrantPassword) {
+                $vagrantPassword = $null
+            }
+        }
+    }
+    catch {
+        Write-Error "Failed to save build credentials: $($_.Exception.Message)"
+        throw
+    }
+}
+#endregion
+
+function Get-VersionSpecificPaths {
+    <#
+    .SYNOPSIS
+        Gets version-specific file paths for Windows Server builds
+    
+    .DESCRIPTION
+        Returns a hashtable containing all the version-specific paths needed for
+        building a Windows Server golden image with Packer.
+        
+    .PARAMETER WindowsVersion
+        Windows Server version (2019 or 2025)
+        
+    .PARAMETER PackerDir
+        Base packer directory path
+        
+    .PARAMETER StorageRoot
+        Storage root directory (optional, defaults to E:\vm_images)
+        
+    .EXAMPLE
+        $paths = Get-VersionSpecificPaths -WindowsVersion "2019" -PackerDir "C:\packer"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('2019', '2025')]
+        [string]$WindowsVersion,
+        
+        [Parameter(Mandatory)]
+        [string]$PackerDir,
+        
+        [string]$StorageRoot = "E:\vm_images"
+    )
+    
+    $paths = @{
+        WindowsVersion = $WindowsVersion
+        BoxName = "windows-server-$WindowsVersion"
+        CustomIsoName = "custom_windows_server_$WindowsVersion.iso"
+        AutoUnattend = Join-Path $PackerDir "autounattend-$WindowsVersion.xml"
+        PackerConfig = Join-Path $PackerDir "windows-server-$WindowsVersion.pkr.hcl"
+        OutputDir = Join-Path $StorageRoot "packer\output-hyperv-iso-$WindowsVersion"
+        CredentialsFile = "windows-server-$WindowsVersion-credentials.json"
+    }
+    
+    return $paths
+}
+
 #region Export Functions
 # Export functions that should be available to other modules
 if ($MyInvocation.MyCommand.Module) {
@@ -621,7 +941,11 @@ if ($MyInvocation.MyCommand.Module) {
         'Invoke-WithRetry',
         'Get-SafeVMName',
         'ConvertTo-AbsolutePath',
-        'Test-IsElevated'
+        'Test-IsElevated',
+        'Get-VersionSpecificPaths',
+        'New-RandomSecurePassword',
+        'New-CustomAutounattendXml',
+        'Save-BuildCredentials'
     )
 }
 #endregion

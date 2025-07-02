@@ -1,118 +1,190 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
-Vagrant.configure("2") do |config|
-  # Use the golden image
-  config.vm.box = "windows-server-2025-golden"
+# Load shared configuration
+require_relative '../shared/common.rb'
+
+# Helper function to get dev-box specific VM configuration
+def get_dev_box_vm_configuration(config_helper)
+  vm_config = {}
+  environment_name = "dev-box"
   
-  # Prompt for VM info
-  vm_name = nil
-  drive_name = nil
-  drive_letter = nil
-  drive_size = nil
-  fixed_size = nil
-  
-  if ARGV[0] == "up" && ARGV.length == 2
-    print "Enter VM name: "
+  # Check if we're in interactive mode
+  if ENV['VAGRANT_INTERACTIVE'] != 'false' && $stdin.tty?
+    puts "\n" + "=" * 60
+    puts "   #{environment_name.upcase} VM Configuration"
+    puts "   Golden Image: #{config_helper.golden_image_box} (#{config_helper.windows_os_name})"
+    puts "=" * 60
+    puts ""
+    
+    # Get VM name
+    default_name = "ax-#{environment_name}image"
+    print "Enter VM name [#{default_name}]: "
     vm_name = $stdin.gets.chomp
-    vm_name = "ax-devimage" if vm_name.empty?
+    vm_config[:name] = vm_name.empty? ? default_name : vm_name
     
-    print "Enter data drive name: "
+    # Data drive configuration for dev-box
+    print "Enter data drive name [Data]: "
     drive_name_input = $stdin.gets.chomp
-    drive_name = drive_name_input.empty? ? "Data" : drive_name_input
-    drive_letter = drive_name[0].upcase
+    vm_config[:drive_name] = drive_name_input.empty? ? "Data" : drive_name_input
+    vm_config[:drive_letter] = vm_config[:drive_name][0].upcase
     
-    print "Enter size for #{drive_letter}: drive (GB): "
+    # Get drive size (default to 100GB for dev environments)
+    default_size = config_helper.get_vm_setting("default_drive_size", 100)
+    print "Enter size for #{vm_config[:drive_letter]}: drive (GB) [#{default_size}]: "
     drive_size_input = $stdin.gets.chomp
-    drive_size = drive_size_input.empty? ? 50 : drive_size_input.to_i
+    vm_config[:drive_size] = drive_size_input.empty? ? default_size : drive_size_input.to_i
     
-    print "Fixed size drive? (y/n, default n): "
+    # Get drive type
+    print "Fixed size drive? (y/n) [n]: "
     fixed_input = $stdin.gets.chomp.downcase
-    fixed_size = fixed_input == 'y' || fixed_input == 'yes'
+    vm_config[:fixed_size] = (fixed_input == 'y' || fixed_input == 'yes')
+    
+    # Resource configuration
+    default_memory = 8192  # More memory for development
+    print "Enter memory (MB) [#{default_memory}]: "
+    memory_input = $stdin.gets.chomp
+    vm_config[:memory] = memory_input.empty? ? default_memory : memory_input.to_i
+    
+    default_cpus = config_helper.get_vm_setting("cpus", 4)  # More CPUs for development
+    print "Enter CPU count [#{default_cpus}]: "
+    cpu_input = $stdin.gets.chomp
+    vm_config[:cpus] = cpu_input.empty? ? default_cpus : cpu_input.to_i
+    
+    # Domain joining configuration
+    puts ""
+    print "Join a domain? (y/n) [n]: "
+    join_domain_input = $stdin.gets.chomp.downcase
+    vm_config[:join_domain] = (join_domain_input == 'y' || join_domain_input == 'yes')
+    
+    if vm_config[:join_domain]
+      print "Enter domain FQDN: "
+      vm_config[:domain_fqdn] = $stdin.gets.chomp
+      
+      print "Enter domain username: "
+      vm_config[:domain_username] = $stdin.gets.chomp
+      
+      print "Enter domain password: "
+      vm_config[:domain_password] = $stdin.gets.chomp
+      
+      # Validate domain settings
+      if vm_config[:domain_fqdn].empty? || vm_config[:domain_username].empty? || vm_config[:domain_password].empty?
+        puts "Error: Domain FQDN, username, and password are required for domain join"
+        exit 1
+      end
+    end
+    
+    puts ""
+    puts "Configuration Summary:"
+    puts "  VM Name: #{vm_config[:name]}"
+    puts "  #{vm_config[:drive_letter]}: Drive: #{vm_config[:drive_size]}GB (#{vm_config[:fixed_size] ? 'Fixed' : 'Dynamic'})"
+    puts "  Memory: #{vm_config[:memory]}MB"
+    puts "  CPUs: #{vm_config[:cpus]}"
+    if vm_config[:join_domain]
+      puts "  Domain: #{vm_config[:domain_fqdn]} (User: #{vm_config[:domain_username]})"
+    else
+      puts "  Domain: Workgroup (not joining domain)"
+    end
+    puts ""
+    
+    print "Continue with this configuration? (Y/n): "
+    confirm = $stdin.gets.chomp.downcase
+    if confirm == 'n' || confirm == 'no'
+      puts "Configuration cancelled."
+      exit 0
+    end
   else
-    vm_name = "ax-devimage"
-    drive_name = "Data"
-    drive_letter = "D"
-    drive_size = 50
-    fixed_size = false
-  end
-  
-  # VM settings
-  config.vm.hostname = vm_name
-  config.vm.guest = :windows
-  config.vm.communicator = "winrm"
-  
-  # WinRM configuration
-  config.winrm.username = "vagrant"
-  config.winrm.password = "vagrant"
-  config.winrm.transport = :plaintext
-  config.winrm.basic_auth_only = true
-  config.winrm.timeout = 300
-  config.winrm.retry_limit = 20
-  
-  # Hyper-V provider settings
-  config.vm.provider "hyperv" do |hv|
-    hv.vmname = vm_name
-    hv.cpus = 4
-    hv.memory = 8192  # More memory for development
-    hv.enable_virtualization_extensions = false
-    hv.linked_clone = false  # Full copy instead of linked clone
-    hv.enable_secure_boot = false
-    hv.enable_automatic_checkpoints = false
-    hv.enable_checkpoints = false
-    hv.vm_integration_services = {
-      guest_service_interface: true,
-      heartbeat: true,
-      key_value_pair_exchange: true,
-      shutdown: true,
-      time_synchronization: false,  # Disable time sync
-      vss: true
-    }
-    hv.vhdx_name = "#{vm_name}_os.vhdx"
+    # Use defaults from configuration
+    vm_config[:name] = "ax-#{environment_name}image"
+    vm_config[:memory] = 8192  # More memory for development
+    vm_config[:cpus] = config_helper.get_vm_setting("cpus", 4)
+    vm_config[:join_domain] = false
     
-    # Create additional data drive
-    hv.additional_disk_path = "#{vm_name}_#{drive_letter.downcase}.vhdx"
-    hv.maxmemory = nil if fixed_size
-    hv.enable_enhanced_session_mode = true
+    # Data drive configuration
+    vm_config[:drive_name] = "Data"
+    vm_config[:drive_letter] = "D"
+    vm_config[:drive_size] = config_helper.get_vm_setting("default_drive_size", 100)
+    vm_config[:fixed_size] = false
   end
   
-  # Create and attach data drive
+  # Add the golden image box name to the config
+  vm_config[:box_name] = config_helper.golden_image_box
+  
+  # Validate that the golden image exists
+  validate_box_exists(vm_config[:box_name])
+  
+  vm_config
+end
+
+# Helper function to configure data drive creation trigger for dev-box
+def configure_dev_box_data_drive_trigger(config, vm_config)
   config.trigger.before :up do |trigger|
-    trigger.info = "Creating #{drive_letter}: drive (#{drive_name})..."
+    trigger.name = "Create additional disk for #{vm_config[:name]}"
+    trigger.info = "Creating #{vm_config[:drive_size]}GB #{vm_config[:fixed_size] ? 'fixed' : 'dynamic'} disk..."
     trigger.run = {
-      inline: "powershell -Command \"" +
-        "$DrivePath = '#{vm_name}_#{drive_letter.downcase}.vhdx'; " +
-        "$DriveSize = #{drive_size}GB; " +
-        "$FixedSize = $#{fixed_size}; " +
-        "if (!(Test-Path $DrivePath)) { " +
-          "if ($FixedSize) { " +
-            "New-VHD -Path $DrivePath -SizeBytes $DriveSize -Fixed; " +
-          "} else { " +
-            "New-VHD -Path $DrivePath -SizeBytes $DriveSize -Dynamic; " +
-          "} " +
-          "Write-Host 'Created #{drive_letter}: drive (#{drive_name}): ' $DrivePath; " +
-        "} else { " +
-          "Write-Host '#{drive_letter}: drive already exists: ' $DrivePath; " +
-        "}\""
+      inline: get_dev_box_disk_creation_script(vm_config)
     }
   end
-  
-  # Network configuration
-  config.vm.network "public_network", bridge: "Virtual Switch VLAN Trunk"
-  
-  # Configure VLAN 31 for Hyper-V
-  config.vm.provider "hyperv" do |hv, override|
-    hv.vlan_id = 31
-  end
-  
-  # Install development tools and configure development environment
-  config.vm.provision "powershell", inline: <<-SHELL, env: {"DRIVE_LETTER" => drive_letter, "DRIVE_NAME" => drive_name}
+end
+
+# Helper function to generate PowerShell script for disk creation
+def get_dev_box_disk_creation_script(vm_config)
+  <<~POWERSHELL
+    $VMName = "#{vm_config[:name]}"
+    $DiskPath = (Get-VMHost).VirtualHardDiskPath + "\\${VMName}_#{vm_config[:drive_letter].downcase}.vhdx"
+    $DiskSizeGB = #{vm_config[:drive_size]}
+    $FixedSize = $#{vm_config[:fixed_size] ? 'true' : 'false'}
+    
+    Write-Host "Creating additional disk for VM: $VMName"
+    Write-Host "Disk path: $DiskPath"
+    Write-Host "Size: ${DiskSizeGB}GB"
+    Write-Host "Type: $(if ($FixedSize) { 'Fixed' } else { 'Dynamic' })"
+    
+    # Check if disk already exists
+    if (Test-Path $DiskPath) {
+        Write-Host "Disk already exists: $DiskPath" -ForegroundColor Yellow
+        return
+    }
+    
+    try {
+        # Create the disk
+        if ($FixedSize) {
+            New-VHD -Path $DiskPath -SizeBytes (${DiskSizeGB}GB) -Fixed
+        } else {
+            New-VHD -Path $DiskPath -SizeBytes (${DiskSizeGB}GB) -Dynamic
+        }
+        
+        Write-Host "Successfully created disk: $DiskPath" -ForegroundColor Green
+        
+        # Check if VM exists and attach the disk
+        $VM = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+        if ($VM) {
+            Write-Host "VM found, attaching disk..." -ForegroundColor Yellow
+            try {
+                Add-VMHardDiskDrive -VMName $VMName -Path $DiskPath
+                Write-Host "Disk attached successfully to $VMName" -ForegroundColor Green
+            } catch {
+                Write-Warning "Failed to attach disk to VM: $($_.Exception.Message)"
+            }
+        } else {
+            Write-Host "VM not found yet, disk will be attached during provisioning" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Error "Failed to create disk: $($_.Exception.Message)"
+        exit 1
+    }
+  POWERSHELL
+end
+
+# Helper function to get dev-box data drive initialization script
+def get_dev_box_data_drive_init_script(vm_config)
+  <<~POWERSHELL
     Write-Host ("=" * 60) 
-    Write-Host "=== Development Box Configuration Starting ===" -ForegroundColor Green
+    Write-Host "=== Dev-Box Data Drive Configuration ===" -ForegroundColor Green
     Write-Host ("=" * 60) 
     
-    $DriveLetter = $env:DRIVE_LETTER
-    $DriveName = $env:DRIVE_NAME
+    $DriveLetter = "#{vm_config[:drive_letter]}"
+    $DriveName = "#{vm_config[:drive_name]}"
     
     # Initialize and format data drive
     Write-Host "Configuring $DriveLetter`: drive ($DriveName)..." -ForegroundColor Yellow
@@ -131,6 +203,73 @@ Vagrant.configure("2") do |config|
     } catch {
         Write-Warning "Failed to configure $DriveLetter`: drive: $($_.Exception.Message)"
     }
+    
+    Write-Host "Data drive configuration completed!" -ForegroundColor Green
+  POWERSHELL
+end
+
+Vagrant.configure("2") do |config|
+  # Create config helper for accessing shared settings
+  config_helper = VagrantConfig.new("dev-box")
+  
+  # Get VM configuration (dev-box specific with data drive prompts)
+  vm_config = get_dev_box_vm_configuration(config_helper)
+  
+  # Use the golden image
+  config.vm.box = vm_config[:box_name]
+  
+  # Apply common VM settings
+  configure_common_vm_settings(config, vm_config, config_helper)
+  
+  # Configure Hyper-V provider with dev-box specific overrides
+  config.vm.provider "hyperv" do |hv|
+    hv.vmname = vm_config[:name]
+    hv.cpus = vm_config[:cpus]
+    hv.memory = vm_config[:memory]
+    
+    # Apply VM defaults from configuration
+    vm_defaults = config_helper.vm_defaults
+    hv.enable_virtualization_extensions = vm_defaults["enable_virtualization_extensions"] || false
+    hv.linked_clone = vm_defaults["linked_clone"] || false
+    hv.enable_secure_boot = vm_defaults["enable_secure_boot"] || false
+    hv.enable_automatic_checkpoints = vm_defaults["enable_automatic_checkpoints"] || false
+    hv.enable_checkpoints = false
+    hv.enable_enhanced_session_mode = vm_defaults["enable_enhanced_session_mode"] || true
+    
+    # VM Integration Services
+    integration_services = vm_defaults["vm_integration_services"] || {}
+    hv.vm_integration_services = {
+      guest_service_interface: integration_services["guest_service_interface"] || true,
+      heartbeat: integration_services["heartbeat"] || true,
+      key_value_pair_exchange: integration_services["key_value_pair_exchange"] || true,
+      shutdown: integration_services["shutdown"] || true,
+      time_synchronization: integration_services["time_synchronization"] || false,
+      vss: integration_services["vss"] || true
+    }
+    
+    # Disk configuration
+    hv.vhdx_name = "#{vm_config[:name]}_os.vhdx"
+    hv.additional_disk_path = "#{vm_config[:name]}_#{vm_config[:drive_letter].downcase}.vhdx"
+    hv.maxmemory = nil if vm_config[:fixed_size]
+    
+    # VLAN configuration
+    global_config = config_helper.global_config
+    hv.vlan_id = global_config["default_vlan"] || 31
+  end
+  
+  # Configure data drive creation trigger
+  configure_dev_box_data_drive_trigger(config, vm_config)
+  
+  # Base system configuration
+  config.vm.provision "powershell", 
+    inline: get_base_provisioning_script(vm_config, config_helper)
+  
+  # Configure data drive
+  config.vm.provision "powershell", 
+    inline: get_dev_box_data_drive_init_script(vm_config)
+  
+  # Install development tools and configure development environment
+  config.vm.provision "powershell", inline: <<-POWERSHELL
     
     # Install Chocolatey package manager
     Write-Host ("=" * 60) 
@@ -414,10 +553,45 @@ foreach ($Tool in $Tools) {
     Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv4-In)"
     Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv6-In)"
     
+    # Domain join if requested
+    $JoinDomain = $env:JOIN_DOMAIN -eq "true"
+    if ($JoinDomain) {
+        $DomainFQDN = $env:DOMAIN_FQDN
+        $DomainUsername = $env:DOMAIN_USERNAME
+        $DomainPassword = $env:DOMAIN_PASSWORD
+        
+        Write-Host ("=" * 60) 
+        Write-Host "Joining domain: $DomainFQDN" -ForegroundColor Yellow
+        Write-Host ("=" * 60) 
+        
+        try {
+            $SecurePassword = ConvertTo-SecureString $DomainPassword -AsPlainText -Force
+            $Credential = New-Object System.Management.Automation.PSCredential($DomainUsername, $SecurePassword)
+            Add-Computer -DomainName $DomainFQDN -Credential $Credential -Force
+            Write-Host "Successfully joined domain: $DomainFQDN" -ForegroundColor Green
+            Write-Host "VM will restart to complete domain join..." -ForegroundColor Yellow
+            $DomainJoined = $true
+        } catch {
+            Write-Warning "Failed to join domain: $($_.Exception.Message)"
+            $DomainJoined = $false
+        }
+    } else {
+        $DomainJoined = $false
+    }
+    
     # Display configuration summary
     Write-Host ("=" * 60) 
     Write-Host "=== Development Box Configuration Complete ===" -ForegroundColor Green
     Write-Host ("=" * 60) 
+    
+    # Display domain status
+    if ($DomainJoined) {
+        Write-Host "Domain Status: Joined to $DomainFQDN" -ForegroundColor Green
+    } elseif ($JoinDomain) {
+        Write-Host "Domain Status: Failed to join $DomainFQDN" -ForegroundColor Red
+    } else {
+        Write-Host "Domain Status: Workgroup (not domain joined)" -ForegroundColor Yellow
+    } 
     
     Write-Host "Installed Development Tools:" 
     $Tools = @(
@@ -461,5 +635,12 @@ foreach ($Tool in $Tools) {
     
     Write-Host "Development Box is ready for coding!" -ForegroundColor Green
     Write-Host "RDP to the machine and start developing!" -ForegroundColor Yellow
-  SHELL
+  POWERSHELL
+  
+  # Install Windows Updates
+  config.vm.provision "powershell", inline: get_windows_updates_script
+  
+  # Final status report
+  config.vm.provision "powershell", 
+    inline: get_status_report_script(vm_config, config_helper, "Development Box #{config_helper.windows_os_name.gsub('-', ' ').split.map(&:capitalize).join(' ')}")
 end

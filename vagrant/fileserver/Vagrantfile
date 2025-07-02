@@ -1,153 +1,48 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
+# Load shared configuration
+require_relative '../shared/common.rb'
+
 Vagrant.configure("2") do |config|
+  # Create config helper for accessing shared settings
+  config_helper = VagrantConfig.new("fileserver")
+  
+  # Get VM configuration (using shared function temporarily - will be replaced)
+  vm_config = {}
+  vm_config[:name] = "ax-fileserverimage"
+  vm_config[:memory] = config_helper.get_vm_setting("memory", 4096)
+  vm_config[:cpus] = config_helper.get_vm_setting("cpus", 4)
+  vm_config[:join_domain] = false
+  vm_config[:box_name] = config_helper.golden_image_box
+  
   # Use the golden image
-  config.vm.box = "windows-server-2025-golden"
+  config.vm.box = vm_config[:box_name]
   
-  # Prompt for VM name and drive configuration
-  vm_name = nil
-  drive_name = nil
-  drive_letter = nil
-  drive_size = nil
-  fixed_size = nil
+  # Apply common VM settings
+  configure_common_vm_settings(config, vm_config, config_helper)
   
-  if ARGV[0] == "up" && ARGV.length == 2
-    print "Enter VM name: "
-    vm_name = $stdin.gets.chomp
-    vm_name = "ax-fsimage" if vm_name.empty?
-    
-    print "Enter data drive name (e.g., 'Data'): "
-    drive_name_input = $stdin.gets.chomp
-    drive_name = drive_name_input.empty? ? "Data" : drive_name_input
-    drive_letter = drive_name[0].upcase
-    
-    print "Enter size for #{drive_letter}: drive (in GB): "
-    drive_size_input = $stdin.gets.chomp
-    drive_size = drive_size_input.empty? ? 100 : drive_size_input.to_i
-    
-    print "Fixed size drive? (y/n, default n): "
-    fixed_input = $stdin.gets.chomp.downcase
-    fixed_size = fixed_input == 'y' || fixed_input == 'yes'
-  else
-    vm_name = "ax-fsimage"
-    drive_name = "Data"
-    drive_letter = "D"
-    drive_size = 100
-    fixed_size = false
-  end
-  
-  # VM settings
-  config.vm.hostname = vm_name
-  config.vm.guest = :windows
-  config.vm.communicator = "winrm"
-  
-  # WinRM configuration
-  config.winrm.username = "vagrant"
-  config.winrm.password = "vagrant"
-  config.winrm.transport = :plaintext
-  config.winrm.basic_auth_only = true
-  config.winrm.timeout = 300
-  config.winrm.retry_limit = 20
-  
-  # Hyper-V provider settings
+  # Configure Hyper-V provider (simplified)
   config.vm.provider "hyperv" do |hv|
-    hv.vmname = vm_name
-    hv.cpus = 4
-    hv.memory = 4096
-    hv.enable_virtualization_extensions = false
-    hv.linked_clone = false  # Full copy instead of linked clone
-    hv.enable_secure_boot = false
-    hv.enable_automatic_checkpoints = false
-    hv.enable_checkpoints = false
-    hv.vm_integration_services = {
-      guest_service_interface: true,
-      heartbeat: true,
-      key_value_pair_exchange: true,
-      shutdown: true,
-      time_synchronization: false,  # Disable time sync
-      vss: true
-    }
-    hv.vhdx_name = "#{vm_name}_os.vhdx"
+    hv.vmname = vm_config[:name]
+    hv.memory = vm_config[:memory]
+    hv.cpus = vm_config[:cpus]
+    hv.vhdx_name = "#{vm_config[:name]}_os.vhdx"
     
-    # Create additional storage drive
-    hv.additional_disk_path = "#{vm_name}_#{drive_letter.downcase}.vhdx"
-    hv.maxmemory = nil if fixed_size
-    hv.enable_enhanced_session_mode = true
+    # VLAN configuration
+    global_config = config_helper.global_config
+    hv.vlan_id = global_config["default_vlan"] || 31
   end
   
-  # Create and attach storage drive
-  config.trigger.before :up do |trigger|
-    trigger.info = "Creating #{drive_letter}: drive (#{drive_name})..."
-    trigger.run = {
-      inline: "powershell -Command \"" +
-        "$DrivePath = '#{vm_name}_#{drive_letter.downcase}.vhdx'; " +
-        "$DriveSize = #{drive_size}GB; " +
-        "$FixedSize = $#{fixed_size}; " +
-        "if (!(Test-Path $DrivePath)) { " +
-          "if ($FixedSize) { " +
-            "New-VHD -Path $DrivePath -SizeBytes $DriveSize -Fixed; " +
-          "} else { " +
-            "New-VHD -Path $DrivePath -SizeBytes $DriveSize -Dynamic; " +
-          "} " +
-          "Write-Host 'Created #{drive_letter}: drive (#{drive_name}): ' $DrivePath; " +
-        "} else { " +
-          "Write-Host '#{drive_letter}: drive already exists: ' $DrivePath; " +
-        "}\""
-    }
-  end
-  
-  # Network configuration
-  config.vm.network "public_network", bridge: "Virtual Switch VLAN Trunk"
-  
-  # Configure VLAN 31 for Hyper-V
-  config.vm.provider "hyperv" do |hv, override|
-    hv.vlan_id = 31
-  end
+  # Base system configuration
+  config.vm.provision "powershell", 
+    inline: get_base_provisioning_script(vm_config, config_helper)
   
   # Install File Server roles and features
-  config.vm.provision "powershell", inline: <<-SHELL, env: {"DRIVE_LETTER" => drive_letter, "DRIVE_NAME" => drive_name}
+  config.vm.provision "powershell", inline: <<-POWERSHELL
     Write-Host ("=" * 60) 
     Write-Host "=== File Server Role Installation Starting ===" -ForegroundColor Green
     Write-Host ("=" * 60) 
-    
-    $DriveLetter = $env:DRIVE_LETTER
-    $DriveName = $env:DRIVE_NAME
-    
-    # Initialize and format storage drive
-    Write-Host "Configuring $DriveLetter`: drive ($DriveName)..." -ForegroundColor Yellow
-    try {
-        # Get the disk that is not initialized (should be our new storage drive)
-        $NewDisk = Get-Disk | Where-Object {$_.PartitionStyle -eq 'RAW' -and $_.Size -gt 1GB} | Select-Object -First 1
-        if ($NewDisk) {
-            Write-Host "Found uninitialized disk, setting up as $DriveLetter`: drive..." -ForegroundColor Green
-            $NewDisk | Initialize-Disk -PartitionStyle GPT -PassThru | 
-                New-Partition -DriveLetter $DriveLetter -UseMaximumSize | 
-                Format-Volume -FileSystem NTFS -NewFileSystemLabel $DriveName -Confirm:$false
-            Write-Host "$DriveLetter`: drive ($DriveName) configured successfully!" -ForegroundColor Green
-        } else {
-            Write-Host "No uninitialized disk found, $DriveLetter`: drive may already be configured" -ForegroundColor Yellow
-        }
-    } catch {
-        Write-Warning "Failed to configure $DriveLetter`: drive: $($_.Exception.Message)"
-    }
-    
-    # Create file share directories on storage drive
-    Write-Host ("=" * 60) 
-    Write-Host "Creating file share directories..." -ForegroundColor Yellow
-    Write-Host ("=" * 60) 
-    $ShareDirs = @(
-        "$DriveLetter`:\\Shares",
-        "$DriveLetter`:\\Users",
-        "$DriveLetter`:\\User Profiles"
-    )
-    
-    foreach ($Dir in $ShareDirs) {
-        if (!(Test-Path $Dir)) {
-            New-Item -ItemType Directory -Path $Dir -Force
-            Write-Host "Created directory: $Dir" -ForegroundColor Green
-        }
-    }
     
     # Install File and Storage Services roles
     Write-Host ("=" * 60) 
@@ -170,10 +65,6 @@ Vagrant.configure("2") do |config|
     # Install Data Deduplication
     Write-Host "Installing Data Deduplication..." -ForegroundColor Yellow
     Install-WindowsFeature -Name FS-Data-Deduplication -IncludeManagementTools
-
-    # Enable Data Deduplication on the data drive
-    Write-Host "Enabling Data Deduplication on $DriveLetter`:..." -ForegroundColor Yellow
-    Enable-DedupVolume -Volume "$DriveLetter`:" -UsageType Default
     
     # Configure Windows Firewall for file sharing and ping
     Write-Host ("=" * 60) 
@@ -205,14 +96,19 @@ Vagrant.configure("2") do |config|
     }
     
     Write-Host "`nFile Server is ready for configuration!" -ForegroundColor Green
-    Write-Host "`nStorage Configuration:" 
-    Write-Host "  - $DriveLetter`:\\Public (public file share)" -ForegroundColor White
-    Write-Host "  - $DriveLetter`:\\Users (user home directories)" -ForegroundColor White
-    Write-Host "  - $DriveLetter`:\\User Profiles (user roaming profiles)" -ForegroundColor White
     Write-Host "`nAvailable management tools:" -ForegroundColor Yellow
     Write-Host "  - Server Manager > File and Storage Services" -ForegroundColor White
     Write-Host "  - PowerShell: New-SmbShare, Enable-DedupVolume, etc." -ForegroundColor White
     Write-Host "  - DFS Management Console" -ForegroundColor White
     Write-Host "  - File Server Resource Manager Console" -ForegroundColor White
-  SHELL
+    
+    Write-Host "`nFile Server Configuration Complete!" -ForegroundColor Green
+  POWERSHELL
+  
+  # Install Windows Updates
+  config.vm.provision "powershell", inline: get_windows_updates_script
+  
+  # Final status report
+  config.vm.provision "powershell", 
+    inline: get_status_report_script(vm_config, config_helper, "File Server #{config_helper.windows_os_name.gsub('-', ' ').split.map(&:capitalize).join(' ')}")
 end

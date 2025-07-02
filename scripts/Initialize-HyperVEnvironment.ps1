@@ -98,6 +98,7 @@ function Show-WelcomeScreen {
     Write-Host "  • HashiCorp Vagrant (for VM deployment)" -ForegroundColor Gray
     Write-Host "  • Microsoft Hyper-V (virtualization platform)" -ForegroundColor Gray
     Write-Host "  • Windows ADK (for ISO creation tools)" -ForegroundColor Gray
+    Write-Host "  • pgen.exe (for secure password generation)" -ForegroundColor Gray
     Write-Host ""
     
     # Show current system info
@@ -330,6 +331,10 @@ function Install-RequiredSoftware {
     Write-WorkflowProgress -Activity "Software Installation" -Status "Installing Windows ADK..." -PercentComplete 70
     Install-WindowsADK
     
+    # Install pgen.exe
+    Write-WorkflowProgress -Activity "Software Installation" -Status "Installing pgen.exe..." -PercentComplete 90
+    Install-PgenTool
+    
     Write-Progress -Activity "Software Installation" -Completed
     Write-Host "✓ Software installation completed!" -ForegroundColor Green
 }
@@ -523,6 +528,83 @@ function Install-WindowsADK {
         Write-Warning "Windows ADK installation encountered issues: $($_.Exception.Message)"
         Write-Host "You may need to install Windows ADK manually from:" -ForegroundColor Yellow
         Write-Host "https://docs.microsoft.com/en-us/windows-hardware/get-started/adk-install" -ForegroundColor Gray
+    }
+}
+
+function Install-PgenTool {
+    <#
+    .SYNOPSIS
+        Downloads and installs pgen.exe for secure password generation
+    #>
+    [CmdletBinding()]
+    param()
+    
+    $pgenPath = Join-Path $env:SystemRoot "System32\pgen.exe"
+    
+    # Check if pgen.exe is already installed
+    if (Test-Path $pgenPath -and -not $Force) {
+        try {
+            $version = & $pgenPath --version 2>$null
+            Write-Host "✓ pgen.exe already installed: $version" -ForegroundColor Green
+            return
+        }
+        catch {
+            Write-Host "pgen.exe exists but not working, reinstalling..." -ForegroundColor Yellow
+        }
+    }
+    
+    $tempDir = Join-Path $env:TEMP "pgen"
+    if (-not (Test-Path $tempDir)) {
+        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    }
+    
+    try {
+        Write-Host "Downloading pgen.exe from GitHub..." -ForegroundColor Yellow
+        
+        # Download the latest release (v1.0.3)
+        $downloadUrl = "https://github.com/DevonCasey/pgen/releases/download/v1.0.3/pgen.exe"
+        $downloadPath = Join-Path $tempDir "pgen.exe"
+        
+        # Download with progress
+        $webClient = New-Object System.Net.WebClient
+        $webClient.DownloadFile($downloadUrl, $downloadPath)
+        
+        # Verify download
+        if (-not (Test-Path $downloadPath)) {
+            throw "Download failed - file not found"
+        }
+        
+        $fileSize = (Get-Item $downloadPath).Length
+        if ($fileSize -lt 1000) {
+            throw "Download failed - file too small ($fileSize bytes)"
+        }
+        
+        Write-Host "Installing pgen.exe to System32..." -ForegroundColor Yellow
+        
+        # Copy to System32
+        Copy-Item $downloadPath $pgenPath -Force
+        
+        # Verify installation
+        try {
+            $version = & $pgenPath --version 2>$null
+            Write-Host "✓ pgen.exe installed successfully: $version" -ForegroundColor Green
+        }
+        catch {
+            throw "Installation verification failed - pgen.exe not working"
+        }
+        
+    }
+    catch {
+        Write-Warning "Failed to install pgen.exe: $($_.Exception.Message)"
+        Write-Host "You may need to install pgen.exe manually from:" -ForegroundColor Yellow
+        Write-Host "https://github.com/DevonCasey/pgen/releases/tag/v1.0.3" -ForegroundColor Gray
+        Write-Host "Download pgen.exe and copy it to: $pgenPath" -ForegroundColor Gray
+    }
+    finally {
+        # Clean up
+        if (Test-Path $tempDir) {
+            Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -1004,6 +1086,24 @@ function Test-InstallationComplete {
 
     if (-not $oscdimgFound) {
         Write-Host "✗ Windows ADK (oscdimg): Not found" -ForegroundColor Red
+        $allGood = $false
+    }
+    
+    # Test pgen.exe
+    Write-WorkflowProgress -Activity "Installation Validation" -Status "Testing pgen.exe..." -PercentComplete 85
+    $pgenPath = Join-Path $env:SystemRoot "System32\pgen.exe"
+    if (Test-Path $pgenPath) {
+        try {
+            $pgenVersion = & $pgenPath --version 2>$null
+            Write-Host "✓ pgen.exe: $pgenVersion" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "✗ pgen.exe: Found but not working" -ForegroundColor Red
+            $allGood = $false
+        }
+    }
+    else {
+        Write-Host "✗ pgen.exe: Not found" -ForegroundColor Red
         $allGood = $false
     }
     

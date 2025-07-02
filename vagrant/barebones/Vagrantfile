@@ -8,14 +8,11 @@
 require_relative '../shared/common'
 
 Vagrant.configure("2") do |config|
-  # Initialize configuration helper
-  config_helper = VagrantConfig.new("barebones")
+  # Get VM configuration from shared module
+  vm_config = get_vm_configuration("barebones")
   
-  # Validate that the golden image exists
-  validate_box_exists(config_helper.golden_image_box)
-  
-  # Get VM configuration (interactive if requested)
-  vm_config = get_vm_configuration("barebones", config_helper)
+  # Use the golden image
+  config.vm.box = vm_config[:box_name]
   
   # Apply common VM settings
   configure_common_vm_settings(config, vm_config, config_helper)
@@ -23,25 +20,14 @@ Vagrant.configure("2") do |config|
   # Configure Hyper-V provider
   configure_hyperv_provider(config, vm_config, config_helper)
   
-  # Configure data drive creation trigger
-  configure_data_drive_trigger(config, vm_config)
-  
   # Base system configuration
   config.vm.provision "powershell", 
-    inline: get_base_provisioning_script(vm_config, config_helper),
-    env: {
-      "DRIVE_LETTER" => vm_config[:drive_letter],
-      "DRIVE_NAME" => vm_config[:drive_name]
-    }
+    inline: get_base_provisioning_script(vm_config, config_helper)
   
   # Install Windows Updates
   config.vm.provision "powershell", inline: get_windows_updates_script
   
   # Final status report
   config.vm.provision "powershell", 
-    inline: get_status_report_script(vm_config, config_helper, "Barebones Windows Server 2025"),
-    env: {
-      "DRIVE_LETTER" => vm_config[:drive_letter],
-      "DRIVE_NAME" => vm_config[:drive_name]
-    }
+    inline: get_status_report_script(vm_config, config_helper, "Barebones #{config_helper.windows_os_name.gsub('-', ' ').split.map(&:capitalize).join(' ')}")
 end

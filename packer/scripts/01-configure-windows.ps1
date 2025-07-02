@@ -104,6 +104,20 @@ try {
     netsh int tcp set global chimney=enabled 2>$null
     netsh int tcp set global rss=enabled 2>$null
     
+    # Prevent "Network do you trust this?" popup
+    Write-Host "Configuring network location policy to prevent interactive prompts..." -ForegroundColor Cyan
+    
+    # Only disable the network location wizard popup
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Network" -Name "NewNetworkWindowOff" -Value "" -Type String -Force -ErrorAction SilentlyContinue
+    
+    # Set current network connections to Private to prevent popup (PowerShell approach)
+    try {
+        Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
+        Write-Host "Set existing network connections to Private category" -ForegroundColor Green
+    } catch {
+        Write-Host "Warning: Could not set network category (this is normal during early boot)" -ForegroundColor Yellow
+    }
+    
     # === SECURITY BASELINE ===
     # Configure basic security settings appropriate for golden image
     Write-Host "Applying security baseline..." -ForegroundColor Cyan
@@ -121,8 +135,8 @@ try {
     Write-Host "Optimizing services..." -ForegroundColor Cyan
     
     $ServicesToDisable = @(
-        'Fax',                    # Fax service
-        'SharedAccess',           # Internet Connection Sharing
+        'Fax',                   # Fax service
+        'SharedAccess',          # Internet Connection Sharing
         'TapiSrv',               # Telephony service
         'WMPNetworkSvc',         # Windows Media Player Network Sharing
         'WSearch'                # Windows Search (can be re-enabled per environment)
