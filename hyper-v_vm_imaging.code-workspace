@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../../../e:"
+		}
+	],
+	"settings": {
+		"powershell.cwd": "hyper-v_vm_imaging"
+	}
+}
