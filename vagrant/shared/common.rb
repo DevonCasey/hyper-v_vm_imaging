@@ -34,7 +34,7 @@ class VagrantConfig
     
     if config_data.nil?
       # Fallback to default configuration
-      puts "Warning: Configuration file not found, using defaults"
+      warn "Warning: Configuration file not found, using defaults"
       config_data = default_configuration
     end
     
