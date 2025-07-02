@@ -1,258 +1,47 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
+# Enhanced Barebones Windows Server 2025 Environment
+# Version: 2.0.0
+
+# Load shared configuration
+require_relative '../shared/common'
+
 Vagrant.configure("2") do |config|
-  # Use the golden image
-  config.vm.box = "windows-server-2022-golden"
+  # Initialize configuration helper
+  config_helper = VagrantConfig.new("barebones")
   
-  # Prompt for VM name and drive configuration
-  vm_name = nil
-  drive_name = nil
-  drive_letter = nil
-  drive_size = nil
-  fixed_size = nil
+  # Validate that the golden image exists
+  validate_box_exists(config_helper.golden_image_box)
   
-  if ARGV[0] == "up" && ARGV.length == 2
-    print "Enter VM name: "
-    vm_name = $stdin.gets.chomp
-    vm_name = "ax-baseimage" if vm_name.empty?
-    
-    print "Enter data drive name (e.g., 'Data'): "
-    drive_name_input = $stdin.gets.chomp
-    drive_name = drive_name_input.empty? ? "Data" : drive_name_input
-    drive_letter = drive_name[0].upcase
-    
-    print "Enter size for #{drive_letter}: drive (in GB): "
-    drive_size_input = $stdin.gets.chomp
-    drive_size = drive_size_input.empty? ? 25 : drive_size_input.to_i
-    
-    print "Fixed size drive? (y/n, default n): "
-    fixed_input = $stdin.gets.chomp.downcase
-    fixed_size = fixed_input == 'y' || fixed_input == 'yes'
-  else
-    vm_name = "ax-baseimage"
-    drive_name = "Data"
-    drive_letter = "D"
-    drive_size = 25
-    fixed_size = false
-  end
+  # Get VM configuration (interactive if requested)
+  vm_config = get_vm_configuration("barebones", config_helper)
   
-  # VM settings
-  config.vm.hostname = vm_name
-  config.vm.guest = :windows
-  config.vm.communicator = "winrm"
-  config.vm.boot_timeout = 600
-  config.vm.graceful_halt_timeout = 600
+  # Apply common VM settings
+  configure_common_vm_settings(config, vm_config, config_helper)
   
-  # WinRM settings
-  config.winrm.username = "vagrant"
-  config.winrm.password = "vagrant"
-  config.winrm.transport = :plaintext
-  config.winrm.basic_auth_only = true
-  config.winrm.timeout = 300
-  config.winrm.retry_limit = 20
-  config.winrm.retry_delay = 10
+  # Configure Hyper-V provider
+  configure_hyperv_provider(config, vm_config, config_helper)
   
-  # Hyper-V provider configuration
-  config.vm.provider "hyperv" do |hv|
-    hv.vmname = vm_name
-    hv.memory = 2048
-    hv.cpus = 2
-    hv.enable_virtualization_extensions = false
-    hv.linked_clone = false  # Full copy instead of linked clone
-    hv.enable_secure_boot = false
-    hv.enable_automatic_checkpoints = false
-    hv.enable_checkpoints = false
-    hv.vm_integration_services = {
-      guest_service_interface: true,
-      heartbeat: true,
-      key_value_pair_exchange: true,
-      shutdown: true,
-      time_synchronization: false,  # Disable time sync
-      vss: true
+  # Configure data drive creation trigger
+  configure_data_drive_trigger(config, vm_config)
+  
+  # Base system configuration
+  config.vm.provision "powershell", 
+    inline: get_base_provisioning_script(vm_config, config_helper),
+    env: {
+      "DRIVE_LETTER" => vm_config[:drive_letter],
+      "DRIVE_NAME" => vm_config[:drive_name]
     }
-    hv.vhdx_name = "#{vm_name}_os.vhdx"
-    
-    # Create additional data drive
-    hv.additional_disk_path = "#{vm_name}_#{drive_letter.downcase}.vhdx"
-    hv.maxmemory = nil if fixed_size
-    hv.enable_enhanced_session_mode = true
-  end
-  
-  # Create and attach data drive
-  config.trigger.before :up do |trigger|
-    trigger.info = "Creating #{drive_letter}: drive (#{drive_name})..."
-    trigger.run = {
-      inline: "powershell -Command \"" +
-        "$DrivePath = '#{vm_name}_#{drive_letter.downcase}.vhdx'; " +
-        "$DriveSize = #{drive_size}GB; " +
-        "$FixedSize = $#{fixed_size}; " +
-        "if (!(Test-Path $DrivePath)) { " +
-          "if ($FixedSize) { " +
-            "New-VHD -Path $DrivePath -SizeBytes $DriveSize -Fixed; " +
-          "} else { " +
-            "New-VHD -Path $DrivePath -SizeBytes $DriveSize -Dynamic; " +
-          "} " +
-          "Write-Host 'Created #{drive_letter}: drive (#{drive_name}): ' $DrivePath; " +
-        "} else { " +
-          "Write-Host '#{drive_letter}: drive already exists: ' $DrivePath; " +
-        "}\""
-    }
-  end
-  
-  # Network configuration
-  config.vm.network "public_network", bridge: "Virtual Switch VLAN Trunk"
-  
-  # Configure VLAN 31 for Hyper-V
-  config.vm.provider "hyperv" do |hv, override|
-    hv.vlan_id = 31
-  end
-  
-  # Minimal provisioning - only essential tasks
-  config.vm.provision "powershell", inline: <<-SHELL, env: {"DRIVE_LETTER" => drive_letter, "DRIVE_NAME" => drive_name}
-    Write-Host ("=" * 60) 
-    Write-Host "=== Barebones Windows Server 2022 Configuration Starting ===" -ForegroundColor Green
-    Write-Host ("=" * 60) 
-    
-    $DriveLetter = $env:DRIVE_LETTER
-    $DriveName = $env:DRIVE_NAME
-    
-    # Initialize and format data drive
-    Write-Host "Configuring $DriveLetter`: drive ($DriveName)..." -ForegroundColor Yellow
-    try {
-        # Get the disk that is not initialized (should be our new data drive)
-        $NewDisk = Get-Disk | Where-Object {$_.PartitionStyle -eq 'RAW' -and $_.Size -gt 1GB} | Select-Object -First 1
-        if ($NewDisk) {
-            Write-Host "Found uninitialized disk, setting up as $DriveLetter`: drive..." -ForegroundColor Green
-            $NewDisk | Initialize-Disk -PartitionStyle GPT -PassThru | 
-                New-Partition -DriveLetter $DriveLetter -UseMaximumSize | 
-                Format-Volume -FileSystem NTFS -NewFileSystemLabel $DriveName -Confirm:$false
-            Write-Host "$DriveLetter`: drive ($DriveName) configured successfully!" -ForegroundColor Green
-        } else {
-            Write-Host "No uninitialized disk found, $DriveLetter`: drive may already be configured" -ForegroundColor Yellow
-        }
-    } catch {
-        Write-Warning "Failed to configure $DriveLetter`: drive: $($_.Exception.Message)"
-    }
-    
-    # Set timezone to Eastern Standard Time
-    Write-Host ("=" * 60) 
-    Write-Host "Setting timezone to Eastern Standard Time..." -ForegroundColor Yellow
-    Write-Host ("=" * 60) 
-    Set-TimeZone -Id "Eastern Standard Time"
-    
-    # Join SERVERS workgroup
-    Write-Host ("=" * 60) 
-    Write-Host "Joining SERVERS workgroup..." -ForegroundColor Yellow
-    Write-Host ("=" * 60) 
-    $WorkgroupName = "SERVERS"
-    
-    # Get current computer information
-    $ComputerSystem = Get-WmiObject -Class Win32_ComputerSystem
-    
-    if ($ComputerSystem.Workgroup -ne $WorkgroupName) {
-        try {
-            # Join the SERVERS workgroup
-            Add-Computer -WorkgroupName $WorkgroupName -Force
-            Write-Host "Successfully joined workgroup: $WorkgroupName" -ForegroundColor Green
-        } catch {
-            Write-Warning "Failed to join workgroup: $($_.Exception.Message)"
-        }
-    } else {
-        Write-Host "Already member of workgroup: $WorkgroupName" -ForegroundColor Green
-    }
-    
-    Write-Host ("=" * 60) 
-    Write-Host "Barebones configuration complete!" -ForegroundColor Green
-    Write-Host ("=" * 60) 
-  SHELL
   
   # Install Windows Updates
-  config.vm.provision "powershell", inline: <<-SHELL
-    Write-Host ("=" * 60) 
-    Write-Host "Installing Windows Updates..." -ForegroundColor Yellow
-    Write-Host ("=" * 60) 
-    
-    try {
-        # Install PSWindowsUpdate module if not present
-        if (!(Get-Module -ListAvailable -Name PSWindowsUpdate)) {
-            Install-Module PSWindowsUpdate -Force -Scope AllUsers
-        }
-        
-        Import-Module PSWindowsUpdate
-        
-        # Get and install all available updates
-        Get-WindowsUpdate -AcceptAll -Install -AutoReboot:$false
-        
-        Write-Host "Windows Updates installation completed" -ForegroundColor Green
-    } catch {
-        Write-Warning "Windows Updates failed: $($_.Exception.Message)"
-        Write-Host "Attempting alternative update method..." -ForegroundColor Yellow
-        
-        # Alternative method using Windows Update API
-        $UpdateSession = New-Object -ComObject Microsoft.Update.Session
-        $UpdateSearcher = $UpdateSession.CreateUpdateSearcher()
-        $SearchResult = $UpdateSearcher.Search("IsInstalled=0")
-        
-        if ($SearchResult.Updates.Count -gt 0) {
-            Write-Host "Found $($SearchResult.Updates.Count) updates to install" -ForegroundColor Yellow
-            
-            $UpdatesToInstall = New-Object -ComObject Microsoft.Update.UpdateColl
-            foreach ($Update in $SearchResult.Updates) {
-                $UpdatesToInstall.Add($Update) | Out-Null
-            }
-            
-            $Installer = $UpdateSession.CreateUpdateInstaller()
-            $Installer.Updates = $UpdatesToInstall
-            $InstallationResult = $Installer.Install()
-            
-            Write-Host "Update installation result: $($InstallationResult.ResultCode)" -ForegroundColor Green
-        } else {
-            Write-Host "No updates available" -ForegroundColor Green
-        }
-    }
-  SHELL
+  config.vm.provision "powershell", inline: get_windows_updates_script
   
   # Final status report
-  config.vm.provision "powershell", inline: <<-SHELL, env: {"DRIVE_LETTER" => drive_letter, "DRIVE_NAME" => drive_name}
-    Write-Host ("=" * 60) 
-    Write-Host "BAREBONES WINDOWS SERVER 2022 READY" -ForegroundColor Green
-    Write-Host ("=" * 60) 
-    
-    $DriveLetter = $env:DRIVE_LETTER
-    $DriveName = $env:DRIVE_NAME
-    
-    # Display system information
-    $ComputerInfo = Get-ComputerInfo
-    $TimeZone = Get-TimeZone
-    $Workgroup = (Get-WmiObject -Class Win32_ComputerSystem).Workgroup
-    
-    Write-Host "Server Name: $env:COMPUTERNAME" -ForegroundColor White
-    Write-Host "Workgroup: $Workgroup" -ForegroundColor White
-    Write-Host "Timezone: $($TimeZone.Id) ($($TimeZone.DisplayName))" -ForegroundColor White
-    Write-Host "OS Version: $($ComputerInfo.WindowsProductName)" -ForegroundColor White
-    Write-Host "Last Boot: $($ComputerInfo.LastBootUpTime)" -ForegroundColor White
-    
-    # Storage information
-    Write-Host "`nStorage Configuration:" 
-    Write-Host "  - C:\\ (OS drive)" -ForegroundColor White
-    Write-Host "  - $DriveLetter`:\\ ($DriveName drive)" -ForegroundColor White
-    
-    # Network information
-    $IPAddress = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.*"}).IPAddress
-    if ($IPAddress) {
-        Write-Host "`nIP Address: $IPAddress" -ForegroundColor White
+  config.vm.provision "powershell", 
+    inline: get_status_report_script(vm_config, config_helper, "Barebones Windows Server 2025"),
+    env: {
+      "DRIVE_LETTER" => vm_config[:drive_letter],
+      "DRIVE_NAME" => vm_config[:drive_name]
     }
-    
-    Write-Host "`nAccess via: vagrant rdp" -ForegroundColor Yellow
-    Write-Host "Username: vagrant" -ForegroundColor Yellow
-    Write-Host "Password: vagrant" -ForegroundColor Yellow
-    
-    # Enable ping
-    Write-Host "`nEnabling ping..." -ForegroundColor Yellow
-    Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv4-In)" -ErrorAction SilentlyContinue
-    Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv6-In)" -ErrorAction SilentlyContinue
-    
-    Write-Host "`nBarebones setup complete - minimal Windows Server 2022 ready!" -ForegroundColor Green
-  SHELL
 end
